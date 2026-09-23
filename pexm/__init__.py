@@ -7,4 +7,4 @@ Two primitives:
   generate(state) -> synthesized context from all accumulated knowledge
 """
 
-from .core import ExperienceModel, MultiTimescaleStreams
+from .core import ExperienceModel

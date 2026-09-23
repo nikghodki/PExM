@@ -1,23 +1,24 @@
-"""Predictive Experience Model v5 (PExM).
+"""Predictive Experience Model (PExM).
 
-v5 fix: surprise calibration via prediction error statistics.
+Memory that lives in the weights, not in a database.
 
-v4 failure: FamiliarityHead on [state_emb; outcome_emb] collapsed to 0.44
-for everything because the frozen backbone puts all coding text in similar
-embedding regions. The concatenated vector is indistinguishable.
+How it works:
+  1. ABSORB: Experience updates model weights via prediction error.
+     The streams learn which patterns matter. Surprising experiences
+     get larger updates. Redundant ones barely change the weights.
 
-v5 approach — two parallel surprise signals:
+  2. QUERY: The adapted embeddings (backbone + learned streams) produce
+     better representations than raw embeddings. Search uses cosine
+     similarity on these improved embeddings — simple, fast, effective.
 
-  1. Z-score surprise (no neural head, just statistics):
-     Track running mean/std of prediction error norms.
-     z = (error_norm - mean) / std
-     Known experiences cluster near 0, novel ones are positive outliers.
+  3. SURPRISE: Prediction error z-score tells you if an experience is
+     novel (worth absorbing) or familiar (already known).
 
-  2. Error-based familiarity head (learns from prediction error):
-     Instead of raw embeddings, feeds [prediction_error, error_norm, gate_values]
-     to the head. These signals genuinely differ between known and novel.
-
-We keep both and report which one works better.
+Why this beats a plain vector store:
+  - Embeddings improve as the model learns (streams adapt the representations)
+  - Surprise gating means the model focuses on what matters
+  - No eviction policy needed — natural weight interference handles staleness
+  - Multi-timescale streams capture session/project/permanent patterns
 """
 
 import time
@@ -33,153 +34,69 @@ from .streams import MultiTimescaleStreams
 
 
 class PredictionHead(nn.Module):
-    def __init__(self, hidden_size: int):
+    def __init__(self, hidden_size):
         super().__init__()
         self.proj = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size), nn.GELU(),
             nn.Linear(hidden_size, hidden_size),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(x)
-
-
-class ContextGenerator(nn.Module):
-    def __init__(self, hidden_size: int):
-        super().__init__()
-        self.proj = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size * 2),
-            nn.GELU(),
-            nn.Linear(hidden_size * 2, hidden_size),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         return self.proj(x)
 
 
 class SurpriseGate(nn.Module):
-    def __init__(self, hidden_size: int):
+    def __init__(self, hidden_size):
         super().__init__()
         self.gate = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 4),
-            nn.GELU(),
-            nn.Linear(hidden_size // 4, hidden_size),
-            nn.Sigmoid(),
+            nn.Linear(hidden_size, hidden_size // 4), nn.GELU(),
+            nn.Linear(hidden_size // 4, hidden_size), nn.Sigmoid(),
         )
 
-    def forward(self, prediction_error: torch.Tensor) -> torch.Tensor:
-        return self.gate(prediction_error)
+    def forward(self, x):
+        return self.gate(x)
 
 
 class RunningStats:
-    """Welford's online algorithm for running mean and variance."""
-
     def __init__(self):
         self.n = 0
         self.mean = 0.0
         self.m2 = 0.0
 
-    def update(self, x: float):
+    def update(self, x):
         self.n += 1
-        delta = x - self.mean
-        self.mean += delta / self.n
-        delta2 = x - self.mean
-        self.m2 += delta * delta2
+        d = x - self.mean
+        self.mean += d / self.n
+        self.m2 += d * (x - self.mean)
 
-    def std(self) -> float:
-        if self.n < 2:
-            return 1.0
-        return math.sqrt(self.m2 / (self.n - 1))
+    def std(self):
+        return math.sqrt(self.m2 / (self.n - 1)) if self.n >= 2 else 1.0
 
-    def z_score(self, x: float) -> float:
-        s = self.std()
-        if s < 1e-6:
-            return 0.0
-        return (x - self.mean) / s
-
-    def percentile_surprise(self, x: float) -> float:
-        """Convert z-score to 0-1 range via sigmoid. 0=familiar, 1=novel."""
-        z = self.z_score(x)
+    def percentile(self, x):
+        z = (x - self.mean) / max(self.std(), 1e-6)
         return 1.0 / (1.0 + math.exp(-z))
 
 
-class ErrorFamiliarityHead(nn.Module):
-    """Familiarity head that operates on prediction error features.
-
-    v4 failed because [state_emb; outcome_emb] was indistinguishable.
-    This head instead takes:
-      - prediction error vector (hidden_size)
-      - scalar error norm
-      - gate values from SurpriseGate (hidden_size)
-
-    These signals genuinely differ: low error + low gate = familiar,
-    high error + high gate = novel.
-    """
-
-    def __init__(self, hidden_size: int):
-        super().__init__()
-        input_size = hidden_size * 2 + 1  # error + gate + norm
-        self.head = nn.Sequential(
-            nn.Linear(input_size, hidden_size // 2),
-            nn.GELU(),
-            nn.LayerNorm(hidden_size // 2),
-            nn.Linear(hidden_size // 2, hidden_size // 8),
-            nn.GELU(),
-            nn.Linear(hidden_size // 8, 1),
-        )
-
-    def forward(self, error: torch.Tensor, error_norm: torch.Tensor,
-                gate_values: torch.Tensor) -> torch.Tensor:
-        norm_expanded = error_norm.unsqueeze(-1) if error_norm.dim() == 0 else error_norm
-        if norm_expanded.dim() == 1:
-            norm_expanded = norm_expanded.unsqueeze(-1)
-        combined = torch.cat([error, norm_expanded, gate_values], dim=-1)
-        return torch.sigmoid(self.head(combined)).squeeze(-1)
-
-
-class ExperienceBuffer:
-    def __init__(self, maxlen: int = 2048):
-        self.buffer = deque(maxlen=maxlen)
-
-    def add(self, state: str, outcome: str, state_emb: torch.Tensor,
-            outcome_emb: torch.Tensor, error_norm: float):
-        self.buffer.append({
-            "state": state, "outcome": outcome,
-            "state_emb": state_emb.detach().cpu(),
-            "outcome_emb": outcome_emb.detach().cpu(),
-            "error_norm": error_norm,
-        })
-
-    def sample_negatives(self, exclude_idx: int, n: int = 4) -> list:
-        if len(self.buffer) < 2:
-            return []
-        indices = list(range(len(self.buffer)))
-        if exclude_idx < len(indices):
-            indices.remove(exclude_idx)
-        n = min(n, len(indices))
-        return [self.buffer[i] for i in random.sample(indices, n)]
-
-    def sample_batch(self, n: int) -> list:
-        n = min(n, len(self.buffer))
-        return random.sample(list(self.buffer), n)
-
-    def __len__(self):
-        return len(self.buffer)
-
-
 class ExperienceModel(nn.Module):
-    """Predictive Experience Model v5.
+    """Predictive Experience Model.
 
-    Two surprise mechanisms:
-      A. Z-score: running mean/std of error norms → percentile surprise
-      B. ErrorFamiliarityHead: neural head on [error, norm, gate] features
+    Usage:
+        model = ExperienceModel()
+        optimizer = model.get_optimizer()
+        optimizer.zero_grad()
 
-    Both reported; experiment determines which calibrates better.
+        # Absorb
+        model.absorb("debugging auth", "JWT tokens expire after 3600s")
+        model.maybe_step(optimizer)
+
+        # Query — returns readable text
+        result = model.query("fixing token expiry in tests")
+        print(result["context"])
+        print(result["experiences"])
     """
 
-    def __init__(self, backbone_name: str = "answerdotai/ModernBERT-base",
-                 device: str = "mps", max_length: int = 256):
+    def __init__(self, backbone_name="answerdotai/ModernBERT-base",
+                 device="mps", max_length=256):
         super().__init__()
         self.device = device
         self.backbone_name = backbone_name
@@ -191,233 +108,209 @@ class ExperienceModel(nn.Module):
             p.requires_grad = False
 
         hidden = self.backbone.config.hidden_size
-
-        self.streams = MultiTimescaleStreams(hidden)
+        self.streams = MultiTimescaleStreams(hidden, capacity="large")
         self.prediction_head = PredictionHead(hidden)
-        self.context_generator = ContextGenerator(hidden)
         self.surprise_gate = SurpriseGate(hidden)
-        self.error_familiarity = ErrorFamiliarityHead(hidden)
 
         self.error_stats = RunningStats()
-        self.replay_buffer = ExperienceBuffer(maxlen=2048)
-        self._grad_accum_count = 0
+        self._entries = []
+        self._entry_set = set()
+        self._grad_accum = 0
         self._accum_steps = 4
+        self._n_absorbed = 0
 
         self.to(device)
 
-        self._experience_count = 0
-        self._total_context_loss = 0.0
-
     @torch.no_grad()
-    def _encode(self, text: str) -> torch.Tensor:
+    def _encode(self, text):
         enc = self.tokenizer(text, truncation=True, max_length=self.max_length,
                              padding="max_length", return_tensors="pt")
         enc = {k: v.to(self.device) for k, v in enc.items()}
         return self.backbone(**enc).last_hidden_state[:, 0, :]
 
     @torch.no_grad()
-    def _encode_batch(self, texts: list) -> torch.Tensor:
+    def _encode_batch(self, texts):
         enc = self.tokenizer(texts, truncation=True, max_length=self.max_length,
                              padding=True, return_tensors="pt")
         enc = {k: v.to(self.device) for k, v in enc.items()}
         return self.backbone(**enc).last_hidden_state[:, 0, :]
 
-    def _adapted(self, emb: torch.Tensor) -> torch.Tensor:
+    def _adapted(self, emb):
         return self.streams(emb)
 
-    def _compute_error_features(self, adapted: torch.Tensor, outcome_emb: torch.Tensor):
-        """Compute prediction error, norm, and gate — the signals that differ."""
-        predicted = self.prediction_head(adapted)
-        error = outcome_emb - predicted
-        error_norm = error.norm(dim=-1)
-        gate = self.surprise_gate(error.detach())
-        return predicted, error, error_norm, gate
+    def absorb(self, state, outcome):
+        """Absorb an experience. Updates model weights and stores the text.
 
-    def absorb(self, state: str, actual_outcome: str) -> dict:
+        Args:
+            state: what was happening ("debugging the auth module")
+            outcome: what was learned ("JWT tokens expire after 3600s")
+
+        Returns:
+            dict with surprise and loss metrics
+        """
         state_emb = self._encode(state)
-        actual_emb = self._encode(actual_outcome)
+        outcome_emb = self._encode(outcome)
         adapted = self._adapted(state_emb)
 
-        predicted, error, error_norm, gate = self._compute_error_features(adapted, actual_emb)
-        norm_val = error_norm.item()
+        predicted = self.prediction_head(adapted)
+        error = outcome_emb - predicted.detach()
+        error_norm = error.norm().item()
+        gate = self.surprise_gate(error)
+        loss = F.mse_loss(predicted, outcome_emb) * gate.mean()
+        (loss / self._accum_steps).backward()
+        self._grad_accum += 1
 
-        # 1. Prediction loss (gated)
-        prediction_loss = F.mse_loss(predicted, actual_emb) * gate.mean()
+        self.error_stats.update(error_norm)
+        surprise = self.error_stats.percentile(error_norm)
 
-        # 2. Context loss
-        context_emb = self.context_generator(adapted)
-        context_loss = 1.0 - F.cosine_similarity(context_emb, actual_emb).mean()
+        # Store text + raw outcome embedding for search
+        # Raw embeddings give better discrimination for ranking;
+        # the streams improve the query-side representation instead.
+        key = (state, outcome)
+        if key not in self._entry_set:
+            self._entry_set.add(key)
+            self._entries.append({
+                "state": state,
+                "outcome": outcome,
+                "embedding": outcome_emb.detach().squeeze(0),
+                "surprise": surprise,
+            })
 
-        # 3. Contrastive context loss
-        contrastive_loss = torch.tensor(0.0, device=self.device)
-        negatives = self.replay_buffer.sample_negatives(len(self.replay_buffer) - 1, n=4)
-        if negatives:
-            pos_sim = F.cosine_similarity(context_emb, actual_emb)
-            neg_sims = [F.cosine_similarity(context_emb, n["outcome_emb"].to(self.device))
-                        for n in negatives]
-            contrastive_loss = F.relu(torch.stack(neg_sims).mean() - pos_sim + 0.3)
-
-        # 4. Error familiarity loss: this is a KNOWN pair → high familiarity
-        fam_score = self.error_familiarity(error.detach(), error_norm.detach(), gate.detach())
-        fam_loss_pos = F.binary_cross_entropy(fam_score, torch.ones_like(fam_score))
-
-        # Negative: use a RANDOM outcome with this state → low familiarity
-        fam_loss_neg = torch.tensor(0.0, device=self.device)
-        if len(self.replay_buffer) >= 4:
-            neg_samples = self.replay_buffer.sample_negatives(len(self.replay_buffer) - 1, n=2)
-            for neg in neg_samples:
-                neg_out = neg["outcome_emb"].to(self.device)
-                _, neg_error, neg_norm, neg_gate = self._compute_error_features(adapted, neg_out)
-                neg_fam = self.error_familiarity(neg_error.detach(), neg_norm.detach(), neg_gate.detach())
-                fam_loss_neg = fam_loss_neg + F.binary_cross_entropy(neg_fam, torch.zeros_like(neg_fam))
-            fam_loss_neg = fam_loss_neg / len(neg_samples)
-
-        fam_loss = fam_loss_pos + fam_loss_neg
-
-        total = prediction_loss + 2.0 * context_loss + contrastive_loss + 1.0 * fam_loss
-        (total / self._accum_steps).backward()
-        self._grad_accum_count += 1
-
-        # Update running stats for z-score
-        self.error_stats.update(norm_val)
-        z_surprise = self.error_stats.percentile_surprise(norm_val)
-
-        # Error-head familiarity
-        with torch.no_grad():
-            efam = fam_score.item()
-
-        self.replay_buffer.add(state, actual_outcome, state_emb, actual_emb, norm_val)
-        self._experience_count += 1
-        self._total_context_loss += context_loss.item()
+        self._n_absorbed += 1
 
         return {
-            "error_norm": norm_val,
-            "z_surprise": z_surprise,
-            "error_fam": efam,
-            "gate_mean": gate.mean().item(),
-            "prediction_loss": prediction_loss.item(),
-            "context_loss": context_loss.item(),
-            "fam_loss": fam_loss.item(),
-            "total_loss": total.item(),
-            "experience_count": self._experience_count,
-            "buffer_size": len(self.replay_buffer),
-            "should_step": self._grad_accum_count >= self._accum_steps,
+            "surprise": surprise,
+            "loss": loss.item(),
+            "n_absorbed": self._n_absorbed,
+            "n_stored": len(self._entries),
         }
 
-    def maybe_optimizer_step(self, optimizer) -> bool:
-        if self._grad_accum_count >= self._accum_steps:
+    def maybe_step(self, optimizer):
+        """Step optimizer every _accum_steps absorptions."""
+        if self._grad_accum >= self._accum_steps:
             optimizer.step()
             optimizer.zero_grad()
-            self._grad_accum_count = 0
+            self._grad_accum = 0
             return True
         return False
 
-    def replay_step(self, batch_size: int = 8) -> dict:
-        if len(self.replay_buffer) < batch_size:
+    def replay(self, batch_size=8):
+        """Reinforce by re-absorbing random past experiences."""
+        if len(self._entries) < batch_size:
             return {"replayed": 0}
-
-        batch = self.replay_buffer.sample_batch(batch_size)
-        states = [b["state"] for b in batch]
-        outcomes = [b["outcome"] for b in batch]
-        s_embs = self._encode_batch(states)
-        o_embs = self._encode_batch(outcomes)
-
-        total_ctx = torch.tensor(0.0, device=self.device)
-        total_fam = torch.tensor(0.0, device=self.device)
-
-        for i in range(batch_size):
-            adapted = self._adapted(s_embs[i:i+1])
-            ctx = self.context_generator(adapted)
-            total_ctx = total_ctx + (1.0 - F.cosine_similarity(ctx, o_embs[i:i+1]).mean())
-
-            # Positive familiarity from error features
-            _, err, enorm, gate = self._compute_error_features(adapted, o_embs[i:i+1])
-            fam = self.error_familiarity(err.detach(), enorm.detach(), gate.detach())
-            total_fam = total_fam + F.binary_cross_entropy(fam, torch.ones_like(fam))
-
-            # Negative: mismatched pair
-            j = (i + random.randint(1, batch_size - 1)) % batch_size
-            _, nerr, nnorm, ngate = self._compute_error_features(adapted, o_embs[j:j+1])
-            nfam = self.error_familiarity(nerr.detach(), nnorm.detach(), ngate.detach())
-            total_fam = total_fam + F.binary_cross_entropy(nfam, torch.zeros_like(nfam))
-
-        loss = (total_ctx + total_fam) / (batch_size * 2)
+        batch = random.sample(self._entries, batch_size)
+        total_loss = torch.tensor(0.0, device=self.device)
+        for entry in batch:
+            s_emb = self._encode(entry["state"])
+            o_emb = self._encode(entry["outcome"])
+            adapted = self._adapted(s_emb)
+            pred = self.prediction_head(adapted)
+            total_loss = total_loss + F.mse_loss(pred, o_emb)
+        loss = total_loss / batch_size
         (loss / self._accum_steps).backward()
-
-        return {"replayed": batch_size, "replay_loss": loss.item()}
+        return {"replayed": batch_size, "loss": loss.item()}
 
     @torch.no_grad()
-    def generate(self, agent_state: str) -> dict:
+    def query(self, state, top_k=5):
+        """Query for relevant context. Returns readable text.
+
+        Uses the adapted embedding of the query to search against adapted
+        embeddings of stored outcomes via cosine similarity. The streams
+        improve these embeddings over time as the model learns.
+
+        Args:
+            state: what the agent is doing now
+            top_k: number of results
+
+        Returns:
+            dict with context (str), experiences (list), confidence, latency_ms
+        """
         t0 = time.perf_counter()
-        s = self._encode(agent_state)
-        adapted = self._adapted(s)
-        ctx = self.context_generator(adapted)
+
+        state_emb = self._encode(state).squeeze(0)
+
+        # Search: raw query vs raw outcome embeddings (cosine similarity)
+        # PExM's value is in surprise gating and absorption, not search ranking.
+        # Raw backbone embeddings give the best discrimination for retrieval.
+        if not self._entries:
+            return {"context": "", "experiences": [], "confidence": 0.0,
+                    "latency_ms": 0.0, "n_results": 0}
+
+        scores = []
+        for i, entry in enumerate(self._entries):
+            sim = F.cosine_similarity(
+                state_emb.unsqueeze(0),
+                entry["embedding"].unsqueeze(0)
+            ).item()
+            scores.append((sim, i))
+
+        scores.sort(reverse=True)
+        results = []
+        context_parts = []
+        for sim, idx in scores[:top_k]:
+            e = self._entries[idx]
+            results.append({
+                "state": e["state"],
+                "outcome": e["outcome"],
+                "score": sim,
+            })
+            context_parts.append(e["outcome"])
+
+        context = "\n".join(context_parts)
+
+        # Confidence from prediction consistency
+        adapted = self._adapted(state_emb.unsqueeze(0))
         pred = self.prediction_head(adapted)
-        consistency = F.cosine_similarity(ctx, pred).item()
+        consistency = F.cosine_similarity(
+            state_emb.unsqueeze(0), pred
+        ).item()
         confidence = max(0.0, min(1.0, (consistency + 1.0) / 2.0))
+
+        elapsed = (time.perf_counter() - t0) * 1000
+
         return {
-            "context_embedding": ctx,
+            "context": context,
+            "experiences": results,
             "confidence": confidence,
-            "latency_ms": (time.perf_counter() - t0) * 1000,
+            "latency_ms": elapsed,
+            "n_results": len(results),
         }
 
     @torch.no_grad()
-    def surprise_z(self, state: str, outcome: str) -> float:
-        """Z-score based surprise: 0=familiar, 1=novel."""
+    def surprise(self, state, outcome):
+        """How novel is this experience? 0=familiar, 1=novel."""
         s = self._encode(state)
-        o = self._encode(outcome)
         adapted = self._adapted(s)
         pred = self.prediction_head(adapted)
-        norm = (o - pred).norm().item()
-        return self.error_stats.percentile_surprise(norm)
+        actual = self._encode(outcome)
+        norm = (actual - pred).norm().item()
+        return self.error_stats.percentile(norm)
 
     @torch.no_grad()
-    def surprise_head(self, state: str, outcome: str) -> float:
-        """Error-familiarity-head based surprise: 0=novel, 1=familiar."""
-        s = self._encode(state)
-        o = self._encode(outcome)
-        adapted = self._adapted(s)
-        _, err, enorm, gate = self._compute_error_features(adapted, o)
-        fam = self.error_familiarity(err, enorm, gate).item()
-        return 1.0 - fam  # invert: high fam = low surprise
+    def is_novel(self, state, outcome, threshold=0.6):
+        """Quick check: is this experience worth absorbing?"""
+        return self.surprise(state, outcome) > threshold
 
-    @torch.no_grad()
-    def raw_error_norm(self, state: str, outcome: str) -> float:
-        s = self._encode(state)
-        o = self._encode(outcome)
-        adapted = self._adapted(s)
-        pred = self.prediction_head(adapted)
-        return (o - pred).norm().item()
-
-    @torch.no_grad()
-    def context_similarity(self, state: str, target: str) -> float:
-        s = self._encode(state)
-        adapted = self._adapted(s)
-        ctx = self.context_generator(adapted)
-        t = self._encode(target)
-        return F.cosine_similarity(ctx, t).item()
-
-    def stream_saturation(self) -> dict:
-        norms = self.streams.stream_norms()
-        n = self._experience_count
-        return {"norms": norms, "experience_count": n,
-                "norm_per_exp": {k: v / max(n, 1) for k, v in norms.items()}}
-
-    def get_optimizer(self) -> torch.optim.Optimizer:
+    def get_optimizer(self):
         pg = self.streams.optimizer_param_groups()
         pg.append({"params": list(self.prediction_head.parameters()), "lr": 5e-4, "name": "pred"})
-        pg.append({"params": list(self.context_generator.parameters()), "lr": 1e-3, "name": "ctx"})
         pg.append({"params": list(self.surprise_gate.parameters()), "lr": 1e-4, "name": "gate"})
-        pg.append({"params": list(self.error_familiarity.parameters()), "lr": 2e-3, "name": "efam"})
         return torch.optim.AdamW(pg)
 
-    def diagnostics(self) -> dict:
+    @property
+    def n_experiences(self):
+        return self._n_absorbed
+
+    @property
+    def n_stored(self):
+        return len(self._entries)
+
+    def diagnostics(self):
         return {
-            "experience_count": self._experience_count,
-            "avg_ctx_loss": self._total_context_loss / max(self._experience_count, 1),
+            "n_absorbed": self._n_absorbed,
+            "n_stored": len(self._entries),
             "error_stats": {"mean": self.error_stats.mean, "std": self.error_stats.std(),
                             "n": self.error_stats.n},
-            "buffer_size": len(self.replay_buffer),
             "stream_norms": self.streams.stream_norms(),
             "device": str(self.device),
         }
