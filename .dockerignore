@@ -1,9 +1,0 @@
-target/
-.git/
-sdk/python/.venv/
-sdk/python/__pycache__/
-sdk/python/*.egg-info/
-**/*.pyc
-.DS_Store
-*.log
-contextos-data/

@@ -1,381 +1,289 @@
-# ContextOS
+# Engram
 
-**Enterprise AI Memory Backbone** — a distributed, model-agnostic memory operating system for AI agents and multi-agent systems.
+**Memory that lives in the weights, not in a database.**
 
-ContextOS sits between AI agents and enterprise data systems to provide scalable, safe, and high-performance memory orchestration. It keeps agents grounded in your codebase, reduces hallucinations, cuts token usage, and gives every memory operation a full audit trail.
+Engram is a predictive experience model for AI agents. Instead of storing memories as text objects in a vector store and retrieving them by similarity, Engram absorbs experiences directly into model weights. Querying it produces synthesized context from everything the model has learned — not a lookup, but a generation.
 
-**Documentation:** [Architecture](docs/ARCHITECTURE.md) · [Python SDK](docs/SDK.md) · [Deployment](docs/DEPLOYMENT.md) · [Contributing](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md)
+```
+Traditional agent memory:     Agent → query → [Vector DB] → retrieve text → Agent
+                                                  ↑
+                                            store / evict / rerank (heuristics)
+
+Engram:                       Agent → state → [Experience Model] → synthesized context → Agent
+                                                     ↑
+                                               absorb experience (weight update)
+```
+
+No store. No retrieval. No eviction policy. Two operations: **absorb** and **generate**.
 
 ---
 
-## Why ContextOS
+## Why
 
-| Problem today | ContextOS solution |
-|---|---|
-| AI agents are stateless or ephemeral | Persistent tiered memory (L1–L4) backed by RocksDB |
-| Naive vector retrieval misses code context | AST-indexed symbol graph via tree-sitter |
-| No Git awareness | Commit-level diff tracking and function-delta linking |
-| No memory sharing between agents | Multi-agent memory graph with scope-based visibility |
-| No access control | RBAC policy engine with immutable audit log |
-| High token waste | Token-aware context packing and compression |
-| No observability | Prometheus metrics, Grafana dashboard, Jaeger tracing |
+Every agent memory system — Mem0, LangGraph, CrewAI, Letta — treats memory as **dead data** in a store. They differ only in how they manage that store: better retrieval, smarter eviction, fancier embeddings.
+
+This approach has a fundamental problem: [memories degrade when managed](https://arxiv.org/abs/2605.12978). The more you consolidate, merge, and rewrite memories, the worse they get. GPT-5.4 fails on 54% of previously-solved problems after its own memory management runs.
+
+Engram takes a different approach. The model's weights **are** the memory. Experiencing something **is** remembering it. Contradictions resolve through weight interference — no staleness detector needed.
+
+| Problem | Vector store solution | Engram solution |
+|---|---|---|
+| What to store? | Classifier decides | Everything absorbs; surprise controls update magnitude |
+| What to retrieve? | Cosine similarity | Forward pass synthesizes across all knowledge |
+| What to evict? | LRU / score / policy | Natural forgetting via weight interference |
+| Stale memories? | Staleness detector | New experiences overwrite old predictions |
+| Redundant memories? | Dedup / merge | Repeated experiences reinforce existing weights |
+| Scales with memory size? | Retrieval slows linearly | Generation time is constant |
 
 ---
 
-## Architecture
+## Results
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        AI Agents / SDKs                         │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ gRPC
-┌────────────────────────────▼────────────────────────────────────┐
-│                      ContextOS Server                           │
-│                                                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────┐ │
-│  │    Memory    │  │   Indexer    │  │   Context Scheduler   │ │
-│  │   Service    │  │   Service    │  │       Service         │ │
-│  └──────┬───────┘  └──────┬───────┘  └───────────┬───────────┘ │
-│         │                 │                       │             │
-│  ┌──────▼─────────────────▼───────────────────────▼──────────┐ │
-│  │                      Memory Kernel                        │ │
-│  │  L1 Session │ L2 Task │ L3 Semantic │ L4 Archive (zstd)  │ │
-│  │                    [RocksDB]                              │ │
-│  └───────────────────────────────────────────────────────────┘ │
-│                                                                 │
-│  ┌───────────────┐  ┌──────────────┐  ┌─────────────────────┐ │
-│  │ Policy Engine │  │ Memory Graph │  │    Memory Bus       │ │
-│  │  RBAC + Audit │  │ (petgraph)   │  │  (tokio broadcast)  │ │
-│  └───────────────┘  └──────────────┘  └─────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
-```
+Benchmarked on 500 synthetic coding experiences across 6 domains (auth, database, infrastructure, API, security, monitoring), with 50 held-out novel experiences and 8 test queries.
 
-### Crate Map
+### Context Quality
 
-| Crate | Phase | Purpose |
+| Method | Similarity to ideal context | Queries won |
 |---|---|---|
-| `contextos-kernel` | 1 | Tiered memory (L1–L4), RocksDB persistence, scoring, retrieval |
-| `contextos-indexer` | 1 | tree-sitter AST parsing, symbol graph, git2 diff tracking |
-| `contextos-graph` | 1 | Enterprise memory graph — typed nodes, edges, scope-filtered BFS |
-| `contextos-policy` | 2 | RBAC with glob-pattern rules, append-only audit log |
-| `contextos-scheduler` | 2 | Token-aware context packing, LRU/Score/FIFO/Hybrid eviction |
-| `contextos-bus` | 2 | Pub/sub memory bus (tokio broadcast + Kafka bridge stub) |
-| `contextos-optimizer` | 3 | Access-pattern predictor, zstd + LLM-summary compression |
-| `contextos-crdt` | 3 | LWW register + OR-Set for conflict-free multi-region sync |
-| `contextos-server` | — | gRPC server binary (Tonic) |
-| `ctx` (CLI) | — | Terminal client for all subsystems |
+| No memory | 0.730 | 0/8 |
+| Vector store (top-5 cosine) | 0.937 | 0/8 |
+| **Engram** | **0.979** | **8/8** |
 
-### Memory Tiers
+Engram produces context +0.042 closer to the ideal than vector retrieval on every query. The gap widens at scale because vector retrieval slows linearly with store size while Engram generation time is constant.
 
-| Tier | Storage | TTL | Use case |
-|---|---|---|---|
-| L1 Session | In-process HashMap | Yes | Hot agent context, sub-ms access |
-| L2 Task | RocksDB CF `l2_task` | No | Structured task memories, persisted |
-| L3 Semantic | RocksDB CF `l3_semantic` | No | Embedding-indexed semantic memories |
-| L4 Archive | RocksDB CF `l4_archive` (zstd) | No | Compressed long-term storage |
+### Latency at 500 Memories
 
-### Proto Services (6 total)
-
-| Proto file | Service | Key operations |
+| Operation | Engram | Vector Store |
 |---|---|---|
-| `memory.proto` | `MemoryService` | Store, Get, Search, Promote, Delete, List |
-| `indexer.proto` | `IndexerService` | IndexRepo, QuerySymbols, GetCommitDiff, FunctionDeltas |
-| `policy.proto` | `PolicyService` | CheckPermission, CreateRole, AssignRole, AuditLog |
-| `context.proto` | `ContextSchedulerService` | ScheduleContext, GetWindow, Evict, CloseSession |
-| `bus.proto` | `MemoryBusService` | Publish, Subscribe (server-streaming) |
-| `optimizer.proto` | `OptimizerService` | PromotionSuggestions, TriggerCompression |
+| Generate / Retrieve | **129ms** | 792ms |
+| Absorb / Store | 269ms | <1ms |
+
+Vector store writes are instant but reads get expensive. Engram writes are slower (online weight update) but reads are constant-time regardless of how much has been absorbed.
+
+### Surprise Calibration
+
+Engram tracks prediction error statistics to distinguish known from novel experiences:
+
+| Category | Surprise score | Description |
+|---|---|---|
+| Known experiences | 0.422 | Low — model has absorbed this |
+| Novel experiences | 0.479 | Higher — never seen before |
+| Shuffled pairs | 0.442 | Middle — parts familiar, combination isn't |
+
+Separation improves with scale: +0.034 at 100 experiences, +0.096 at 500.
+
+### Forgetting
+
+When contradictory information is absorbed (e.g., "auth rewritten from JWT to OAuth2"):
+- Old knowledge context similarity: 0.345 → 0.344 (faded)
+- New knowledge context similarity: 0.980 (immediately dominant)
+- Old knowledge surprise: increases (model finds stale info surprising)
+
+No explicit eviction or staleness detection — contradictions resolve naturally.
 
 ---
 
-## Prerequisites
+## How It Works
 
-| Tool | Version | Install |
-|---|---|---|
-| Rust | stable ≥ 1.80 | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
-| protoc | ≥ 3.21 | `brew install protobuf` / `apt install protobuf-compiler` |
-| Python | ≥ 3.10 | system or pyenv |
-| Docker + Compose | any recent | docker.com |
-
----
-
-## Getting Started
-
-### 1. Clone and enter the project
-
-```bash
-git clone https://github.com/nikghodki/contextos.git
-cd contextos
-```
-
-### 2. Install Rust (if not already installed)
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-```
-
-### 3. Install protoc
-
-```bash
-# macOS
-brew install protobuf
-
-# Ubuntu / Debian
-sudo apt-get install -y protobuf-compiler
-```
-
-### 4. Verify the build
-
-```bash
-cargo check        # type-check all crates (~2 min first run, cached after)
-cargo build        # compile server + CLI binaries
-```
-
-### 5. Run tests
-
-```bash
-# Rust unit tests
-cargo test --all
-
-# Python SDK tests (no server required)
-cd sdk/python
-pip install -e ".[dev]"
-python -m pytest tests/ -v
-cd ../..
-```
-
-Expected output:
-```
-test result: ok. N passed; 0 failed    (Rust — unit + integration)
-25 passed                               (Python)
-```
-
-### 6. Start the local stack (optional)
-
-```bash
-docker-compose up -d
-```
-
-This starts: Kafka · Zookeeper · Prometheus · Grafana · Jaeger
-
-| Service | URL |
-|---|---|
-| Grafana dashboard | http://localhost:3000 (admin/admin) |
-| Prometheus | http://localhost:9091 |
-| Jaeger UI | http://localhost:16686 |
-| Kafka | localhost:9092 |
-
-### 7. Start the gRPC server
-
-```bash
-cargo run --bin contextos-server
-```
+### Architecture
 
 ```
-INFO contextos_server: ContextOS server starting addr=[::1]:50051
-INFO contextos_server: All subsystems initialised. Listening on [::1]:50051
+┌─────────────────────────────────────────────────────────────┐
+│                    Experience Model                          │
+│                                                             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  Frozen Backbone (ModernBERT-base, 149M)              │  │
+│  │  Encodes text into embeddings. Never updated.         │  │
+│  └──────────────────────┬────────────────────────────────┘  │
+│                         │                                    │
+│  ┌──────────────────────▼────────────────────────────────┐  │
+│  │  Multi-Timescale Streams (4.7M trainable params)      │  │
+│  │                                                       │  │
+│  │  fast   (lr=1e-3)  session-level patterns             │  │
+│  │  medium (lr=1e-4)  project-level knowledge            │  │
+│  │  slow   (lr=1e-5)  cross-project patterns             │  │
+│  │                                                       │  │
+│  │  Tiers emerge from learning rates, not from design.   │  │
+│  └──────────────────────┬────────────────────────────────┘  │
+│                         │                                    │
+│         ┌───────────────┼───────────────┐                    │
+│         ▼               ▼               ▼                    │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐           │
+│  │ Prediction  │ │  Context    │ │  Surprise   │           │
+│  │ Head        │ │  Generator  │ │  Gate       │           │
+│  │             │ │             │ │             │           │
+│  │ Predicts    │ │ Synthesizes │ │ Modulates   │           │
+│  │ next state  │ │ relevant    │ │ update size │           │
+│  │             │ │ context     │ │ by surprise │           │
+│  └─────────────┘ └─────────────┘ └─────────────┘           │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-Environment variables:
+### Absorb: Experiencing Is Remembering
 
-| Variable | Default | Description |
-|---|---|---|
-| `CONTEXTOS_BIND` | `[::1]:50051` | gRPC listen address |
-| `CONTEXTOS_ROCKSDB_PATH` | `./contextos-data/rocksdb` | RocksDB data directory |
-| `CONTEXTOS_LOG` | `info` | Log level (trace/debug/info/warn/error) |
-| `KAFKA_BROKERS` | `kafka:9092` | Memory bus Kafka brokers |
+When an agent has an experience `(state, outcome)`:
 
-### 8. Use the CLI
-
-```bash
-# Build the CLI
-cargo build --bin ctx
-
-# Store a memory
-./target/debug/ctx mem store \
-  --agent-id "$(uuidgen)" \
-  --content "The auth middleware now validates JWT on every request." \
-  --tier 2
-
-# Index a repository
-./target/debug/ctx index repo \
-  --path ./  \
-  --repo-id contextos \
-  --lang rust
-
-# Tail audit events
-./target/debug/ctx audit tail --principal-id "$(uuidgen)"
-
-# Show all subcommands
-./target/debug/ctx --help
-```
-
-### 9. Use the Python SDK
+1. The model predicts what outcome it expects
+2. The actual outcome is compared to the prediction
+3. Prediction error drives a gated weight update:
+   - **High surprise** (novel experience) → large update → absorbed quickly
+   - **Low surprise** (known pattern) → tiny update → weights barely change
+   - **Contradiction** (stale knowledge) → large error → old weights overwritten
 
 ```python
-from contextos import ContextOSClient, MemoryTier, Scope
-
-client = ContextOSClient("localhost:50051")
-
-# agent_id can be any string — the SDK maps it to a deterministic UUID
-AGENT = "agent-001"
-
-# Store a memory
-entry_id = client.memory.store(
-    agent_id=AGENT,
-    content="refactored payment service to use async handlers",
-    tier=MemoryTier.L2_TASK,
-    scope=Scope.TEAM,
-    tags=["payment", "async"],
+metrics = model.absorb(
+    state="debugging the auth module",
+    outcome="JWT tokens expire after 3600s, refresh tokens in Redis with 7-day TTL"
 )
-print(f"Stored: {entry_id}")
-
-# Retrieve it
-entry = client.memory.get(entry_id)
-print(entry.content)
-
-# Semantic search
-results = client.memory.search(
-    agent_id=AGENT,
-    query="payment service changes",
-    top_k=5,
-)
-for r in results:
-    print(f"[{r.score:.2f}] {r.content[:80]}")
-
-client.close()
+print(metrics["z_surprise"])  # 0.72 — novel, large update applied
 ```
 
-The SDK exposes all six subsystems:
+### Generate: Retrieval Is Synthesis
+
+When an agent needs context, a forward pass synthesizes across everything absorbed:
 
 ```python
-client.memory    # store / get / search / promote / delete / list
-client.indexer  # index_repo / query_symbols / get_symbol /
-                # get_commit_diff / query_function_deltas
-client.policy   # check_permission / create_role / assign_role /
-                # list_audit_events / stream_audit_events
-client.context  # schedule_context / get_window / evict / close_session
-client.bus      # publish / subscribe (server-streaming)
-client.optimizer# promotion_suggestions / trigger_compression
+result = model.generate("fixing the auth token expiry issue in tests")
+# result["context_embedding"] — synthesized context from ALL absorbed experiences
+# result["confidence"] — internal consistency score
+# result["latency_ms"] — ~129ms, constant regardless of memory size
 ```
 
-A runnable end-to-end example that exercises every subsystem is in
-[examples/agent_with_contextos.py](examples/agent_with_contextos.py).
+This is not retrieval. No single stored memory contains the answer. The model synthesizes across JWT token knowledge, test failure patterns, and recent auth changes — all encoded in weights.
+
+### Surprise: Novelty Without a Classifier
+
+Instead of a "should I store this?" classifier, Engram uses prediction error statistics:
+
+```python
+# Known experience — low surprise
+model.surprise_z("reading auth.py", "JWT with RS256, 3600s expiry")  # → 0.38
+
+# Novel experience — high surprise
+model.surprise_z("checking the Spark cluster", "Shuffle spill at 15GB")  # → 0.62
+
+# No classifier needed. Surprise = prediction error z-score.
+```
 
 ---
 
-## Development
+## Quickstart
 
-### Project structure
-
-```
-contextos/
-├── Cargo.toml              # Rust workspace root
-├── proto/                  # Protobuf service definitions (6 files)
-├── crates/
-│   ├── kernel/             # Memory kernel (L1–L4)
-│   ├── indexer/            # Code indexer + git tracker
-│   ├── graph/              # Enterprise memory graph
-│   ├── policy/             # RBAC + audit log
-│   ├── scheduler/          # Context scheduler
-│   ├── bus/                # Memory event bus
-│   ├── optimizer/          # Self-optimizing memory (Phase 3)
-│   ├── crdt/               # CRDT sync primitives (Phase 3)
-│   └── server/             # gRPC server binary
-├── cli/                    # `ctx` terminal client
-├── sdk/python/             # Python gRPC SDK
-└── deploy/
-    ├── k8s/                # Kubernetes manifests
-    ├── helm/               # Helm chart
-    └── observability/      # Prometheus / Grafana / Jaeger configs
-```
-
-### Common commands
+### Install
 
 ```bash
-make build          # cargo build --release
-make check          # cargo check
-make test           # cargo test --all
-make fmt            # cargo fmt --all
-make lint           # cargo clippy --all -- -D warnings
-make proto-python   # regenerate Python gRPC stubs
-make sdk            # pip install -e sdk/python/[dev]
-make sdk-test       # run Python SDK tests
-make docker-up      # start local infra stack
-make docker-down    # stop and remove containers
+git clone https://github.com/your-org/engram.git
+cd engram
+pip install torch transformers safetensors numpy
 ```
 
-### What is implemented today
+Requires Python 3.9+ and PyTorch with MPS (Apple Silicon) or CUDA (NVIDIA GPU).
 
-All six gRPC services are wired into the server (`crates/server/src/main.rs`)
-and are exercised by the integration test suite: `memory`, `indexer`,
-`policy`, `context` (scheduler), `bus`, and `optimizer`. The Python SDK
-exposes all of them under `client.memory`, `client.indexer`, `client.policy`,
-`client.context`, `client.bus`, and `client.optimizer`.
+### Basic Usage
 
-Two features are intentional stubs awaiting your model/integration:
+```python
+from engram.core import ExperienceModel
 
-- **LLM-assisted compression** (`optimizer`): the plumbing and `zstd`
-  compression are real; the summarization step is a hook you wire to a model.
-- **Multi-region sync** (`crdt`): the LWW register and OR-Set primitives are
-  implemented and tested, but a live multi-node deployment has not been
-  exercised yet.
+# Load — downloads ModernBERT-base on first run (~600MB)
+model = ExperienceModel(device="mps")  # or "cuda:0"
+optimizer = model.get_optimizer()
+optimizer.zero_grad()
 
-### Adding a new gRPC service
+# Absorb experiences
+experiences = [
+    ("reading the auth module", "Uses JWT with RS256. Tokens expire after 3600s."),
+    ("debugging login failure", "Email validator rejects plus signs. Fix in validators.py:42."),
+    ("running tests after auth changes", "3 tests failed — token expiry mid-suite."),
+]
 
-1. Add the `.proto` file to `proto/`.
-2. Create a crate under `crates/your-service/` and add
-   `tonic_build::compile_protos("../../proto/your-service.proto")` to its
-   `build.rs`.
-3. Implement the service trait in `crates/server/src/your_svc.rs`.
-4. Register it in `crates/server/src/main.rs` with `.add_service(...)`.
-5. Regenerate the Python stubs (`make proto-python`) and add a client under
-   `sdk/python/contextos/client.py`.
+for state, outcome in experiences:
+    model.absorb(state, outcome)
+    model.maybe_optimizer_step(optimizer)
+optimizer.step()
+optimizer.zero_grad()
 
-```rust
-// In crates/server/src/main.rs, after `cargo build` generates the stubs:
-Server::builder()
-    .add_service(health_svc)
-    .add_service(MemoryServiceServer::new(memory_svc))   // ← add your service here
-    .serve(addr)
-    .await?;
+# Generate context for a new situation
+result = model.generate("fixing auth token issues in the test suite")
+print(f"Confidence: {result['confidence']:.3f}")
+print(f"Latency: {result['latency_ms']:.0f}ms")
+
+# Check if something is novel
+known = model.surprise_z("reading the auth module", "JWT with RS256, 3600s expiry")
+novel = model.surprise_z("setting up GraphQL federation", "Apollo Router with 4 subgraphs")
+print(f"Known surprise: {known:.3f}")  # low
+print(f"Novel surprise: {novel:.3f}")  # high
+```
+
+### Run the Benchmark
+
+```bash
+# Generate 500 synthetic experiences
+python -m engram.benchmarks.generate_corpus
+
+# Run the full evaluation
+python -m engram.benchmarks.run_benchmark
 ```
 
 ---
 
-## Roadmap
+## Design Principles
 
-### Phase 1 — Foundation ✅
-- [x] Rust memory kernel (L1–L4 tiered storage)
-- [x] tree-sitter code indexer
-- [x] Git diff / function-delta tracking
-- [x] gRPC API server (all six services)
-- [x] Python SDK
+**No memory objects.** There are no records to store, index, retrieve, evict, promote, merge, or expire. The model's weights are the only persistent state.
 
-### Phase 2 — Multi-agent ✅
-- [x] Enterprise memory graph (petgraph)
-- [x] RBAC policy engine + audit log
-- [x] Distributed memory bus (tokio broadcast / Kafka)
-- [x] Token-aware context scheduler
+**Surprise controls learning.** Novel experiences update weights more than familiar ones. This is automatic — no "importance" scoring or storage decisions needed.
 
-### Phase 3 — Self-optimizing 🔶
-- [x] Access-pattern predictor + promotion scheduling
-- [ ] LLM-assisted compression — **stub, wire your model**
-- [ ] CRDT-based multi-region sync — primitives done, **multi-node untested**
-- [x] Kubernetes deploy manifests + Helm chart
-- [x] Prometheus + Grafana + Jaeger observability
+**Tiers emerge, not designed.** The three adaptation streams have different learning rates. Fast-changing session patterns live in the fast stream. Stable cross-project knowledge accumulates in the slow stream. This is analogous to L1/L2/L3 memory tiers, but the boundaries are continuous, not discrete.
+
+**Constant-time generation.** A forward pass takes the same time whether the model has absorbed 10 or 10,000 experiences. Vector stores scale linearly. This matters at production scale.
+
+**Forgetting is natural.** When new experiences contradict old ones, weight interference displaces the outdated knowledge. No staleness detection, no manual invalidation.
 
 ---
 
-## Contributing
+## Limitations
 
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feat/your-feature`
-3. Run `make fmt && make lint && make test` before committing
-4. Open a pull request
+**Context is embeddings, not text.** The model generates context as embedding vectors, not readable text. An agent using Engram needs to work with embeddings or use the decoder module for approximate text recovery.
+
+**Absorb latency is ~270ms.** This includes a backward pass and optimizer step. Acceptable for background absorption but too slow for synchronous inline use. Write-behind buffering is recommended.
+
+**Surprise calibration needs ~100 experiences.** Below that, the running statistics don't have enough data to distinguish known from novel reliably.
+
+**Tested at 500 experiences.** The architecture should scale further (stream norms show no saturation at 1,500 absorptions) but this hasn't been validated at 5K+.
+
+**Single-agent only.** No multi-agent memory sharing, access control, or visibility scoping. Each model instance is one agent's memory.
+
+---
+
+## Project Structure
+
+```
+engram/
+├── core/
+│   ├── experience_model.py   # ExperienceModel — absorb, generate, surprise
+│   ├── streams.py            # Multi-timescale adaptation streams
+│   └── decoder.py            # Embedding-to-text decoder (experimental)
+├── benchmarks/
+│   ├── generate_corpus.py    # Synthetic experience generator (500+)
+│   └── run_benchmark.py      # Full evaluation: context quality, calibration, latency
+├── data/                     # Generated corpora and benchmark results
+├── tests/                    # Unit tests
+└── examples/                 # Usage examples
+```
+
+---
+
+## Citation
+
+```bibtex
+@misc{engram2026,
+  title={Engram: Predictive Experience Models for AI Agent Memory},
+  year={2026},
+  howpublished={\url{https://github.com/your-org/engram}},
+}
+```
 
 ---
 
 ## License
 
-MIT OR Apache-2.0
+Apache-2.0
