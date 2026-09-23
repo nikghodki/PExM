@@ -37,49 +37,48 @@ PExM takes a different approach. The model's weights **are** the memory. Experie
 
 ---
 
-## Results
+## Benchmarks
 
-Benchmarked on 500 synthetic coding experiences across 6 domains (auth, database, infrastructure, API, security, monitoring), with 50 held-out novel experiences and 8 test queries.
+All benchmarks on Apple Silicon (MPS). 500 synthetic coding experiences across 6 domains, 50 held-out novel experiences, 8 test queries. Full reproduction: `PYTHONPATH=. python pexm/benchmarks/run_full_benchmark.py`.
 
-### Context Quality
+### Scaling Behavior
 
-| Method | Similarity to ideal context | Queries won |
+PExM needs ~50 experiences to surpass vector retrieval. After that, quality holds steady while vector store latency grows linearly.
+
+| Experiences | PExM | Vector Store | Delta | Wins | Generate | Retrieve | Surprise Sep |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 0.865 | 0.935 | -0.070 | 0/8 | 118ms | 127ms | -0.064 |
+| 50 | 0.975 | 0.938 | +0.037 | 8/8 | 119ms | 169ms | +0.015 |
+| 100 | 0.978 | 0.944 | +0.034 | 8/8 | 117ms | 237ms | +0.045 |
+| 200 | 0.977 | 0.935 | +0.042 | 8/8 | 119ms | 352ms | +0.021 |
+| 500 | 0.979 | 0.937 | +0.042 | 8/8 | 118ms | 797ms | +0.101 |
+
+- **Context quality**: PExM +0.042 over vector store at 500 experiences, winning 8/8 queries
+- **Generate latency is constant**: 118ms at every scale. Vector retrieve grows 127ms to 797ms (6.3x)
+- **Surprise calibration improves with scale**: separation +0.101 at 500 experiences
+- **Forgetting works at every scale**: contradictions displace stale knowledge
+
+### Conversational Memory (Multi-Turn Recall)
+
+PExM is designed for **synthesis across many experiences**, not verbatim episode lookup. On a LoCoMo-style multi-turn recall task (3 sessions, 9 queries asking about specific events):
+
+| Method | Recall Similarity | Queries Won |
+|---|---:|---:|
+| Vector Store | 0.957 | **9/9** |
+| PExM | 0.703 | 0/9 |
+
+Vector store wins here because conversational recall needs exact episode retrieval ("who fixed the bug?" needs the exact commit message). PExM blends across all absorbed knowledge and loses specific details. This is an intentional tradeoff: PExM excels when the answer **spans multiple experiences** (the scaling benchmark), not when it lives in one specific memory.
+
+### When to Use PExM vs a Vector Store
+
+| Scenario | Better choice | Why |
 |---|---|---|
-| No memory | 0.730 | 0/8 |
-| Vector store (top-5 cosine) | 0.937 | 0/8 |
-| **PExM** | **0.979** | **8/8** |
-
-PExM produces context +0.042 closer to the ideal than vector retrieval on every query. The gap widens at scale because vector retrieval slows linearly while PExM generation time is constant.
-
-### Latency at 500 Memories
-
-| Operation | PExM | Vector Store |
-|---|---|---|
-| Generate / Retrieve | **129ms** | 792ms |
-| Absorb / Store | 269ms | <1ms |
-
-Vector store writes are instant but reads get expensive. PExM writes are slower (online weight update) but reads are constant-time regardless of how much has been absorbed.
-
-### Surprise Calibration
-
-PExM tracks prediction error statistics to distinguish known from novel experiences:
-
-| Category | Surprise score | Description |
-|---|---|---|
-| Known experiences | 0.422 | Low — model has absorbed this |
-| Novel experiences | 0.479 | Higher — never seen before |
-| Shuffled pairs | 0.442 | Middle — parts familiar, combination new |
-
-Separation improves with scale: +0.034 at 100 experiences, +0.096 at 500.
-
-### Natural Forgetting
-
-When contradictory information is absorbed (e.g., "auth rewritten from JWT to OAuth2"):
-- Old knowledge context similarity fades
-- New knowledge becomes immediately dominant
-- Old knowledge surprise increases (model finds stale info surprising)
-
-No explicit eviction or staleness detection — contradictions resolve naturally.
+| "What do I need to know about auth?" | **PExM** | Synthesizes across many experiences |
+| "Who pushed commit abc123?" | **Vector store** | Exact episode lookup |
+| 500+ memories, latency matters | **PExM** | Constant-time generation (118ms vs 797ms) |
+| Fewer than 50 memories | **Vector store** | PExM needs ~50 experiences to learn |
+| Contradictory information over time | **PExM** | Natural forgetting vs stale entries |
+| Multi-agent, need exact audit trail | **Vector store** | PExM has no discrete records |
 
 ---
 
@@ -144,7 +143,7 @@ When an agent needs context, a forward pass synthesizes across everything absorb
 result = model.generate("fixing the auth token expiry issue in tests")
 # result["context_embedding"]  -- synthesized context from ALL absorbed experiences
 # result["confidence"]         -- internal consistency score
-# result["latency_ms"]         -- ~129ms, constant regardless of memory size
+# result["latency_ms"]         -- ~118ms, constant regardless of memory size
 ```
 
 This is not retrieval. No single stored memory contains the answer. The model synthesizes across JWT knowledge, test failure patterns, and auth changes — all encoded in weights.
@@ -209,14 +208,24 @@ print(f"Known surprise: {known:.3f}")  # low
 print(f"Novel surprise: {novel:.3f}")  # high
 ```
 
-### Run the Benchmark
+### Run the Benchmarks
 
 ```bash
 # Generate 500 synthetic experiences
-python -m pexm.benchmarks.generate_corpus
+PYTHONPATH=. python pexm/benchmarks/generate_corpus.py
 
-# Run the full evaluation
-python -m pexm.benchmarks.run_benchmark
+# Full benchmark suite (scaling + conversational + latency)
+PYTHONPATH=. python pexm/benchmarks/run_full_benchmark.py
+```
+
+### Run the Examples
+
+```bash
+# Quick intro: absorb, generate, surprise, forgetting
+PYTHONPATH=. python examples/quickstart.py
+
+# Head-to-head comparison vs vector store
+PYTHONPATH=. python examples/compare_vector_store.py
 ```
 
 ---
@@ -237,9 +246,10 @@ python -m pexm.benchmarks.run_benchmark
 
 ## Limitations
 
+- **Not for exact recall.** PExM synthesizes across experiences. If you need verbatim lookup of a specific memory, use a vector store (see conversational memory benchmark above).
+- **Needs ~50 experiences.** Below that, PExM underperforms vector retrieval. The model needs sufficient data to learn meaningful patterns.
 - **Context is embeddings, not text.** The model generates context as embedding vectors, not readable text. Use the decoder module for approximate text recovery.
 - **Absorb latency is ~270ms.** Includes backward pass and optimizer step. Use write-behind buffering for inline use.
-- **Surprise calibration needs ~100 experiences.** Below that, running statistics lack sufficient data.
 - **Tested at 500 experiences.** Stream norms show no saturation at 1,500 absorptions, but 5K+ is unvalidated.
 - **Single-agent only.** No multi-agent memory sharing or access control.
 
@@ -255,7 +265,8 @@ pexm/
     decoder.py            # Embedding-to-text decoder (experimental)
   benchmarks/
     generate_corpus.py    # Synthetic experience generator (500+)
-    run_benchmark.py      # Full evaluation suite
+    run_benchmark.py      # Quick evaluation
+    run_full_benchmark.py # Full benchmark suite (scaling + conversational + latency)
   data/                   # Generated corpora and results
   tests/
 examples/
