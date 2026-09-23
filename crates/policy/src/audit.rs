@@ -76,6 +76,10 @@ impl AuditLog {
     pub fn len(&self) -> usize {
         self.entries.read().expect("audit read").len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.read().expect("audit read").is_empty()
+    }
 }
 
 impl Default for AuditLog {

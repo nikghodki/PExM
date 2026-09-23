@@ -12,9 +12,9 @@ from pathlib import Path
 from enum import Enum
 
 # Add ContextOS SDK to path (optional integration)
-CONTEXTOS_PATH = "/Users/nikhil/workspace/contextos/sdk/python"
-if CONTEXTOS_PATH not in sys.path:
-    sys.path.append(CONTEXTOS_PATH)
+SDK_PATH = str(Path(__file__).resolve().parent.parent / "sdk" / "python")
+if SDK_PATH not in sys.path:
+    sys.path.append(SDK_PATH)
 
 try:
     import claude_agent_sdk

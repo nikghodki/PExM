@@ -32,4 +32,9 @@ testpaths    = ["tests"]
 
 [tool.ruff]
 line-length = 100
-select      = ["E", "F", "I"]
+# Generated gRPC stubs (grpcio-tools output) are not hand-written code;
+# don't lint them.
+extend-exclude = ["contextos/proto"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

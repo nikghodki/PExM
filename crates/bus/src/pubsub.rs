@@ -22,12 +22,17 @@ impl MemoryBus {
     }
 
     /// Publish a memory event to all subscribers.
+    ///
+    /// A broadcast channel returns an error only when there are *no* active
+    /// subscribers; publishing in that state is a legitimate no-op (fire-and-
+    /// forget), so we treat it as success rather than a failure.
     pub fn publish(&self, event: MemoryEvent) -> Result<()> {
         debug!(event_id = %event.event_id, kind = ?event.kind, "publishing memory event");
-        self.tx
-            .send(event)
-            .map_err(|e| anyhow::anyhow!("bus send failed: {e}"))?;
-        Ok(())
+        match self.tx.send(event) {
+            Ok(_n_receivers) => Ok(()),
+            // No receivers — nothing to deliver. Not an error.
+            Err(broadcast::error::SendError(_)) => Ok(()),
+        }
     }
 
     /// Subscribe to all events, optionally filtered by kind.
@@ -90,6 +95,22 @@ mod tests {
         let received = rx.recv().await.unwrap();
         assert_eq!(received.event_id, expected_id);
         assert_eq!(received.kind, MemoryEventKind::MemoryCreated);
+    }
+
+    #[tokio::test]
+    async fn publish_with_no_subscribers_succeeds() {
+        // Publishing with zero active receivers must not error — a pub/sub
+        // bus is fire-and-forget, so a publish with no listeners is a no-op.
+        let bus = MemoryBus::new();
+        assert_eq!(bus.subscriber_count(), 0);
+        let ev = MemoryEvent::new(
+            MemoryEventKind::MemoryCreated,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "team",
+        );
+        bus.publish(ev)
+            .expect("publish with no subscribers should succeed");
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@ services:
     image: contextos/server:dev
     ports:
       - "50051:50051"    # gRPC
-      - "9090:9090"      # Prometheus metrics
+      - "9090:9090"      # Prometheus /metrics (Phase 3 — not yet served)
     environment:
       CONTEXTOS_ROCKSDB_PATH: /data/rocksdb
       CONTEXTOS_LOG: info

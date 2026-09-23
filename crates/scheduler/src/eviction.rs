@@ -16,7 +16,7 @@ pub enum EvictionPolicy {
 
 impl EvictionPolicy {
     /// Sort `entries` in eviction priority order (front = evict first).
-    pub fn sort_for_eviction(&self, entries: &mut Vec<ContextEntry>) {
+    pub fn sort_for_eviction(&self, entries: &mut [ContextEntry]) {
         match self {
             EvictionPolicy::Lru => {
                 // Entries with oldest access time first

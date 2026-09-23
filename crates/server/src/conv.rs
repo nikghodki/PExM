@@ -34,6 +34,8 @@ pub fn ts_from_proto(ts: prost_types::Timestamp) -> DateTime<Utc> {
 // ─── UUID helper ──────────────────────────────────────────────────────────────
 
 /// Parse a UUID string, mapping parse errors to `Status::invalid_argument`.
+// `tonic::Status` is large (it carries gRPC metadata), which is expected here.
+#[allow(clippy::result_large_err)]
 pub fn uuid_parse(s: &str) -> Result<Uuid, Status> {
     Uuid::parse_str(s).map_err(|e| Status::invalid_argument(format!("invalid UUID '{}': {}", s, e)))
 }

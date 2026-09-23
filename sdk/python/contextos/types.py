@@ -12,7 +12,6 @@ from datetime import datetime
 from enum import IntEnum
 from typing import Optional
 
-
 # ─── Enums ────────────────────────────────────────────────────────────────────
 
 class MemoryTier(IntEnum):
@@ -56,6 +55,18 @@ class EvictionPolicy(IntEnum):
     SCORE  = 2
     FIFO   = 3
     HYBRID = 4
+
+
+class PermissionAction(IntEnum):
+    READ   = 1
+    WRITE  = 2
+    DELETE = 3
+    ADMIN  = 4
+
+
+class Effect(IntEnum):
+    ALLOW = 1
+    DENY  = 2
 
 
 # ─── Memory types ─────────────────────────────────────────────────────────────
@@ -147,3 +158,50 @@ class ContextWindow:
     budget_tokens:   int
     entries:         list[ContextEntry] = field(default_factory=list)
     eviction_policy: str                = "LRU"
+
+
+# ─── Policy / RBAC types ──────────────────────────────────────────────────────
+
+@dataclass
+class Role:
+    id:          str
+    name:        str
+    permissions: list[str]  = field(default_factory=list)
+
+
+@dataclass
+class PermissionCheck:
+    effect:  Effect
+    rule_id: str   = ""
+    reason:  str   = ""
+
+
+@dataclass
+class AuditEvent:
+    id:           str
+    principal_id: str
+    resource:     str
+    action:       PermissionAction
+    outcome:      Effect
+    details:      str = ""
+    ip_address:   str = ""
+    occurred_at:  Optional[datetime] = None
+
+
+# ─── Optimizer types ──────────────────────────────────────────────────────────
+
+@dataclass
+class PromotionSuggestion:
+    memory_id:   str
+    reason:      str
+    target_tier: str
+    confidence:  float = 0.0
+
+
+@dataclass
+class CompressionResult:
+    memory_id:     str
+    compressed:    bool
+    before_tokens: int
+    after_tokens:  int
+    summary:       str = ""

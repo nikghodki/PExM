@@ -21,9 +21,30 @@ Run `make proto-python` from the repo root to regenerate the stubs.
 from __future__ import annotations
 
 import uuid
-import grpc
+from datetime import datetime
 from typing import Optional
 
+import grpc
+
+from .types import (
+    AuditEvent,
+    CommitDiff,
+    CompressionResult,
+    ContextEntry,
+    ContextWindow,
+    Effect,
+    EvictionPolicy,
+    FileDiff,
+    MemoryEntry,
+    MemoryEventKind,
+    MemoryTier,
+    PermissionAction,
+    PermissionCheck,
+    PromotionSuggestion,
+    Scope,
+    SymbolKind,
+    SymbolNode,
+)
 
 # ── UUID coercion ─────────────────────────────────────────────────────────────
 
@@ -41,14 +62,15 @@ def _coerce_uuid(value: str) -> str:
     except ValueError:
         return str(uuid.uuid5(_CONTEXTOS_NS, value))
 
-from .types import (
-    MemoryEntry, MemoryTier, Scope,
-    SymbolNode, SymbolKind,
-    CommitDiff,
-    MemoryEvent, MemoryEventKind,
-    ContextWindow, EvictionPolicy,
-)
 
+def _ts(ts) -> Optional[datetime]:
+    """Convert a proto ``Timestamp`` to a Python datetime, or None if unset."""
+    if ts is None:
+        return None
+    # A default-constructed Timestamp (no value) is not "set" in proto3 terms.
+    if ts.seconds == 0 and ts.nanos == 0:
+        return None
+    return ts.ToDatetime()
 
 class _MemoryClient:
     """High-level wrapper around the MemoryService gRPC stub."""
@@ -101,14 +123,17 @@ class _MemoryClient:
             return None
         e = resp.entry
         return MemoryEntry(
-            id      = e.id,
-            agent_id= e.agent_id,
-            content = e.content,
-            tier    = MemoryTier(e.tier),
-            scope   = Scope(e.scope),
-            score   = e.score,
-            tags    = list(e.tags),
-            metadata= dict(e.metadata),
+            id         = e.id,
+            agent_id   = e.agent_id,
+            content    = e.content,
+            tier       = MemoryTier(e.tier),
+            scope      = Scope(e.scope),
+            score      = e.score,
+            tags       = list(e.tags),
+            metadata   = dict(e.metadata),
+            created_at = _ts(e.created_at),
+            accessed_at= _ts(e.accessed_at),
+            expires_at = _ts(e.expires_at),
         )
 
     def search(
@@ -148,6 +173,45 @@ class _MemoryClient:
         resp = self._get_stub().DeleteMemory(memory_pb2.DeleteMemoryRequest(id=memory_id))
         return resp.ok
 
+    def promote(self, memory_id: str, target_tier: MemoryTier) -> MemoryTier:
+        """Promote a memory to a higher tier and return the resulting tier."""
+        from contextos.proto import memory_pb2  # type: ignore
+        req  = memory_pb2.PromoteMemoryRequest(id=memory_id, target_tier=target_tier.value)
+        resp = self._get_stub().PromoteMemory(req)
+        if not resp.ok:
+            raise RuntimeError(f"PromoteMemory failed for {memory_id}")
+        return MemoryTier(resp.new_tier)
+
+    def list(
+        self,
+        agent_id: str,
+        tier: MemoryTier | None = None,
+        scope: Scope | None = None,
+        page_size: int = 50,
+    ) -> list[MemoryEntry]:
+        """List memories for an agent, optionally filtered by tier/scope."""
+        from contextos.proto import memory_pb2  # type: ignore
+        req = memory_pb2.ListMemoriesRequest(
+            agent_id   = _coerce_uuid(agent_id),
+            tier       = tier.value if tier is not None else 0,
+            scope      = scope.value if scope is not None else 0,
+            page_size  = page_size,
+        )
+        resp = self._get_stub().ListMemories(req)
+        return [
+            MemoryEntry(
+                id      = e.id,
+                agent_id= e.agent_id,
+                content = e.content,
+                tier    = MemoryTier(e.tier),
+                scope   = Scope(e.scope),
+                score   = e.score,
+                tags    = list(e.tags),
+                metadata= dict(e.metadata),
+            )
+            for e in resp.entries
+        ]
+
 
 class _IndexerClient:
     def __init__(self, channel: grpc.Channel) -> None:
@@ -157,7 +221,9 @@ class _IndexerClient:
         from contextos.proto import indexer_pb2_grpc  # type: ignore
         return indexer_pb2_grpc.IndexerServiceStub(self._channel)
 
-    def index_repo(self, repo_id: str, local_path: str, languages: list[str], incremental: bool = False) -> dict:
+    def index_repo(
+        self, repo_id: str, local_path: str, languages: list[str], incremental: bool = False
+    ) -> dict:
         from contextos.proto import indexer_pb2  # type: ignore
         req  = indexer_pb2.IndexRepositoryRequest(
             repo_id    = repo_id,
@@ -186,6 +252,303 @@ class _IndexerClient:
             for s in resp.results
         ]
 
+    def _to_symbol(self, s) -> SymbolNode:
+        """Map a proto SymbolNode to the SDK dataclass."""
+        return SymbolNode(
+            id             = s.id,
+            repo_id        = s.repo_id,
+            file_path      = s.file_path,
+            name           = s.name,
+            qualified_name = s.qualified_name,
+            kind           = SymbolKind(s.kind),
+            start_line     = s.start_line,
+            end_line       = s.end_line,
+            signature      = s.signature,
+            docstring      = s.docstring,
+            callers        = list(s.callers),
+            callees        = list(s.callees),
+            deps           = list(s.deps),
+            metadata       = dict(s.metadata),
+        )
+
+    def get_symbol(self, symbol_id: str) -> Optional[SymbolNode]:
+        from contextos.proto import indexer_pb2  # type: ignore
+        req  = indexer_pb2.GetSymbolRequest(id=symbol_id)
+        resp = self._get_stub().GetSymbol(req)
+        if not resp.HasField("symbol"):
+            return None
+        return self._to_symbol(resp.symbol)
+
+    def get_commit_diff(self, repo_id: str, commit_sha: str) -> Optional[CommitDiff]:
+        from contextos.proto import indexer_pb2  # type: ignore
+        req  = indexer_pb2.GetCommitDiffRequest(repo_id=repo_id, commit_sha=commit_sha)
+        resp = self._get_stub().GetCommitDiff(req)
+        if not resp.HasField("diff"):
+            return None
+        d = resp.diff
+        return CommitDiff(
+            repo_id    = d.repo_id,
+            commit_sha = d.commit_sha,
+            author     = d.author,
+            message    = d.message,
+            timestamp  = datetime.fromtimestamp(d.timestamp) if d.timestamp else None,
+            files      = [
+                FileDiff(
+                    path         = f.path,
+                    added_lines  = f.added_lines,
+                    removed_lines= f.removed_lines,
+                    old_content  = f.old_content,
+                    new_content  = f.new_content,
+                )
+                for f in d.files
+            ],
+        )
+
+    def query_function_deltas(self, function_id: str, limit: int = 10) -> list[dict]:
+        """Return recent deltas (old/new body + linked tests) for a function."""
+        from contextos.proto import indexer_pb2  # type: ignore
+        req  = indexer_pb2.QueryFunctionDeltasRequest(function_id=function_id, limit=limit)
+        resp = self._get_stub().QueryFunctionDeltas(req)
+        return [
+            {
+                "function_id": d.function_id,
+                "commit_sha":  d.commit_sha,
+                "old_body":    d.old_body,
+                "new_body":    d.new_body,
+                "linked_test_ids": list(d.linked_test_ids),
+            }
+            for d in resp.deltas
+        ]
+
+
+class _PolicyClient:
+    """High-level wrapper around the PolicyService gRPC stub (RBAC + audit)."""
+
+    def __init__(self, channel: grpc.Channel) -> None:
+        self._channel = channel
+
+    def _get_stub(self):
+        from contextos.proto import policy_pb2_grpc  # type: ignore
+        return policy_pb2_grpc.PolicyServiceStub(self._channel)
+
+    def check_permission(
+        self,
+        principal_id: str,
+        resource: str,
+        action: PermissionAction,
+    ) -> PermissionCheck:
+        from contextos.proto import policy_pb2  # type: ignore
+        req  = policy_pb2.CheckPermissionRequest(
+            principal_id = _coerce_uuid(principal_id),
+            resource     = resource,
+            action       = action.value,
+        )
+        resp = self._get_stub().CheckPermission(req)
+        return PermissionCheck(effect=Effect(resp.effect), rule_id=resp.rule_id, reason=resp.reason)
+
+    def create_role(self, name: str, permissions: list[str]) -> str:
+        """Create a role and return its ID."""
+        from contextos.proto import policy_pb2  # type: ignore
+        req  = policy_pb2.CreateRoleRequest(
+            role=policy_pb2.Role(name=name, permissions=permissions)
+        )
+        resp = self._get_stub().CreateRole(req)
+        if not resp.success:
+            raise RuntimeError(f"CreateRole failed for '{name}'")
+        return resp.id
+
+    def assign_role(self, principal_id: str, role_id: str) -> None:
+        from contextos.proto import policy_pb2  # type: ignore
+        self._get_stub().AssignRole(
+            policy_pb2.AssignRoleRequest(principal_id=_coerce_uuid(principal_id), role_id=role_id)
+        )
+
+    def list_audit_events(self, principal_id: str, page_size: int = 50) -> list[AuditEvent]:
+        from contextos.proto import policy_pb2  # type: ignore
+        req  = policy_pb2.ListAuditEventsRequest(
+            principal_id = _coerce_uuid(principal_id), page_size=page_size
+        )
+        resp = self._get_stub().ListAuditEvents(req)
+        return [
+            AuditEvent(
+                id          = e.id,
+                principal_id= e.principal_id,
+                resource    = e.resource,
+                action      = PermissionAction(e.action),
+                outcome     = Effect(e.outcome),
+                details     = e.details,
+                ip_address  = e.ip_address,
+                occurred_at = _ts(e.occurred_at),
+            )
+            for e in resp.events
+        ]
+
+    def stream_audit_events(self, principal_id: str):
+        """Return a server-streaming iterator of audit events."""
+        from contextos.proto import policy_pb2  # type: ignore
+        req  = policy_pb2.StreamAuditRequest(principal_id=_coerce_uuid(principal_id))
+        return self._get_stub().StreamAuditEvents(req)
+
+
+class _ContextClient:
+    """High-level wrapper around the ContextSchedulerService gRPC stub."""
+
+    def __init__(self, channel: grpc.Channel) -> None:
+        self._channel = channel
+
+    def _get_stub(self):
+        from contextos.proto import context_pb2_grpc  # type: ignore
+        return context_pb2_grpc.ContextSchedulerServiceStub(self._channel)
+
+    def schedule_context(
+        self,
+        agent_id: str,
+        session_id: str,
+        token_budget: int = 4096,
+        policy: EvictionPolicy = EvictionPolicy.HYBRID,
+        query_hints: list[str] | None = None,
+    ) -> ContextWindow:
+        """Build the token-budgeted context window for a session."""
+        from contextos.proto import context_pb2  # type: ignore
+        req  = context_pb2.ScheduleContextRequest(
+            agent_id      = _coerce_uuid(agent_id),
+            session_id    = session_id,
+            token_budget  = token_budget,
+            policy        = policy.value,
+            query_hints   = query_hints or [],
+        )
+        resp = self._get_stub().ScheduleContext(req)
+        return self._to_window(resp.window)
+
+    def get_window(self, session_id: str) -> ContextWindow:
+        from contextos.proto import context_pb2  # type: ignore
+        resp = self._get_stub().GetContextWindow(
+            context_pb2.GetContextWindowRequest(session_id=session_id)
+        )
+        return self._to_window(resp)
+
+    def close_session(self, session_id: str) -> None:
+        from contextos.proto import context_pb2  # type: ignore
+        self._get_stub().CloseSession(context_pb2.CloseSessionRequest(session_id=session_id))
+
+    def evict(
+        self,
+        session_id: str,
+        policy: EvictionPolicy = EvictionPolicy.LRU,
+        target_tokens: int = 0,
+    ) -> dict:
+        """Evict context entries; returns ``{"evicted_count", "freed_tokens"}``."""
+        from contextos.proto import context_pb2  # type: ignore
+        req  = context_pb2.EvictRequest(
+            session_id=session_id, policy=policy.value, target_tokens=target_tokens
+        )
+        resp = self._get_stub().Evict(req)
+        return {"evicted_count": resp.evicted_count, "freed_tokens": resp.freed_tokens}
+
+    def _to_window(self, w) -> ContextWindow:
+        return ContextWindow(
+            session_id     = w.session_id,
+            total_tokens   = w.total_tokens,
+            budget_tokens  = w.budget_tokens,
+            entries        = [
+                ContextEntry(
+                    id          = e.id,
+                    content     = e.content,
+                    relevance   = e.relevance,
+                    token_count = e.token_count,
+                    source_tier = e.source_tier,
+                    source_id   = e.source_id,
+                )
+                for e in w.entries
+            ],
+            eviction_policy = w.eviction_policy,
+        )
+
+
+class _BusClient:
+    """High-level wrapper around the MemoryBusService gRPC stub (pub/sub)."""
+
+    def __init__(self, channel: grpc.Channel) -> None:
+        self._channel = channel
+
+    def _get_stub(self):
+        from contextos.proto import bus_pb2_grpc  # type: ignore
+        return bus_pb2_grpc.MemoryBusServiceStub(self._channel)
+
+    def publish(self, memory_id: str, agent_id: str, scope: str,
+                kind: MemoryEventKind = MemoryEventKind.MEMORY_CREATED,
+                payload: dict[str, str] | None = None) -> str:
+        """Publish a memory event and return the event ID."""
+        from contextos.proto import bus_pb2  # type: ignore
+        req  = bus_pb2.PublishEventRequest(
+            event=bus_pb2.MemoryEvent(
+                event_id  = str(uuid.uuid4()),
+                kind      = kind.value,
+                memory_id = memory_id,
+                agent_id  = _coerce_uuid(agent_id),
+                scope     = scope,
+                payload   = payload or {},
+            )
+        )
+        resp = self._get_stub().PublishEvent(req)
+        return resp.event_id
+
+    def subscribe(
+        self,
+        agent_id: str,
+        event_kinds: list[MemoryEventKind] | None = None,
+        scope_filter: str = "",
+    ):
+        """Return a server-streaming iterator of memory events."""
+        from contextos.proto import bus_pb2  # type: ignore
+        req = bus_pb2.SubscribeRequest(
+            agent_id      = _coerce_uuid(agent_id),
+            event_kinds   = [k.value for k in (event_kinds or [])],
+            scope_filter  = scope_filter,
+        )
+        return self._get_stub().Subscribe(req)
+
+
+class _OptimizerClient:
+    """High-level wrapper around the OptimizerService gRPC stub."""
+
+    def __init__(self, channel: grpc.Channel) -> None:
+        self._channel = channel
+
+    def _get_stub(self):
+        from contextos.proto import optimizer_pb2_grpc  # type: ignore
+        return optimizer_pb2_grpc.OptimizerServiceStub(self._channel)
+
+    def promotion_suggestions(self, agent_id: str, limit: int = 10) -> list[PromotionSuggestion]:
+        from contextos.proto import optimizer_pb2  # type: ignore
+        req  = optimizer_pb2.GetPromotionSuggestionsRequest(
+            agent_id=_coerce_uuid(agent_id), limit=limit
+        )
+        resp = self._get_stub().GetPromotionSuggestions(req)
+        return [
+            PromotionSuggestion(
+                memory_id   = s.memory_id,
+                reason      = s.reason,
+                target_tier = s.target_tier,
+                confidence  = s.confidence,
+            )
+            for s in resp.suggestions
+        ]
+
+    def trigger_compression(self, memory_id: str, strategy: str = "auto") -> CompressionResult:
+        """Request compression of a memory; ``strategy`` is 'summary' | 'delta' | 'auto'."""
+        from contextos.proto import optimizer_pb2  # type: ignore
+        req  = optimizer_pb2.TriggerCompressionRequest(memory_id=memory_id, strategy=strategy)
+        resp = self._get_stub().TriggerCompression(req)
+        r = resp.result
+        return CompressionResult(
+            memory_id     = r.memory_id,
+            compressed    = r.compressed,
+            before_tokens = r.before_tokens,
+            after_tokens  = r.after_tokens,
+            summary       = r.summary,
+        )
+
 
 class ContextOSClient:
     """
@@ -193,6 +556,10 @@ class ContextOSClient:
 
     - ``client.memory``    — MemoryService
     - ``client.indexer``   — IndexerService
+    - ``client.policy``    — PolicyService (RBAC + audit)
+    - ``client.context``   — ContextSchedulerService
+    - ``client.bus``       — MemoryBusService (pub/sub)
+    - ``client.optimizer`` — OptimizerService
     """
 
     def __init__(self, address: str = "localhost:50051", use_tls: bool = False) -> None:
@@ -201,8 +568,12 @@ class ContextOSClient:
         else:
             self._channel = grpc.insecure_channel(address)
 
-        self.memory  = _MemoryClient(self._channel)
-        self.indexer = _IndexerClient(self._channel)
+        self.memory   = _MemoryClient(self._channel)
+        self.indexer  = _IndexerClient(self._channel)
+        self.policy   = _PolicyClient(self._channel)
+        self.context  = _ContextClient(self._channel)
+        self.bus      = _BusClient(self._channel)
+        self.optimizer= _OptimizerClient(self._channel)
 
     def close(self) -> None:
         self._channel.close()

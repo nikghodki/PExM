@@ -593,8 +593,9 @@ async fn test_optimizer_suggestions_and_compression() {
         .into_inner();
     // No accesses recorded → suggestions should be empty (threshold not met)
     assert!(
-        sug_resp.suggestions.len() == 0 || sug_resp.suggestions.len() > 0,
-        "suggestion RPC responded"
+        sug_resp.suggestions.is_empty(),
+        "expected no promotion suggestions before any access, got {}",
+        sug_resp.suggestions.len()
     );
 
     // Trigger compression on the stored memory

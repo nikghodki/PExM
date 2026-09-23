@@ -3,24 +3,29 @@ Unit tests for the ContextOS Python SDK types module.
 No server required — pure data class tests.
 """
 
-import pytest
 from datetime import datetime, timezone
 
 from contextos.types import (
-    MemoryEntry,
-    MemoryTier,
-    Scope,
-    SymbolNode,
-    SymbolKind,
+    AuditEvent,
     CommitDiff,
+    CompressionResult,
+    ContextEntry,
+    ContextWindow,
+    Effect,
+    EvictionPolicy,
     FileDiff,
+    MemoryEntry,
     MemoryEvent,
     MemoryEventKind,
-    ContextWindow,
-    ContextEntry,
-    EvictionPolicy,
+    MemoryTier,
+    PermissionAction,
+    PermissionCheck,
+    PromotionSuggestion,
+    Role,
+    Scope,
+    SymbolKind,
+    SymbolNode,
 )
-
 
 # ─── MemoryEntry ──────────────────────────────────────────────────────────────
 
@@ -110,7 +115,7 @@ def test_commit_diff():
     assert diff.files[0].added_lines == 12
 
 
-# ─── MemoryEvent ─────────────────────────────────────────────────────────────
+# ─── MemoryEvent ──────────────────────────────────────────────────────────────
 
 def test_memory_event_kinds():
     event = MemoryEvent(
@@ -152,3 +157,68 @@ def test_eviction_policy_values():
     assert EvictionPolicy.SCORE  == 2
     assert EvictionPolicy.FIFO   == 3
     assert EvictionPolicy.HYBRID == 4
+
+
+# ─── Policy / RBAC types ──────────────────────────────────────────────────────
+
+def test_permission_action_values():
+    assert PermissionAction.READ   == 1
+    assert PermissionAction.WRITE  == 2
+    assert PermissionAction.DELETE == 3
+    assert PermissionAction.ADMIN  == 4
+
+
+def test_effect_values():
+    assert Effect.ALLOW == 1
+    assert Effect.DENY  == 2
+
+
+def test_role_defaults():
+    role = Role(id="role-1", name="memory-admin", permissions=["memory:*"])
+    assert role.permissions == ["memory:*"]
+
+
+def test_permission_check():
+    check = PermissionCheck(effect=Effect.ALLOW, rule_id="rule-9", reason="matched glob")
+    assert check.effect == Effect.ALLOW
+    assert check.rule_id == "rule-9"
+
+
+def test_audit_event():
+    evt = AuditEvent(
+        id           = "aud-1",
+        principal_id = "agent-001",
+        resource     = "memory:*",
+        action       = PermissionAction.READ,
+        outcome      = Effect.ALLOW,
+        details      = "read team memory",
+        ip_address   = "10.0.0.1",
+        occurred_at  = datetime(2025, 1, 1, tzinfo=timezone.utc),
+    )
+    assert evt.action == PermissionAction.READ
+    assert evt.outcome == Effect.ALLOW
+
+
+# ─── Optimizer types ──────────────────────────────────────────────────────────
+
+def test_promotion_suggestion():
+    s = PromotionSuggestion(
+        memory_id   = "mem-7",
+        reason      = "high access frequency",
+        target_tier = "L3_SEMANTIC",
+        confidence  = 0.93,
+    )
+    assert s.confidence == 0.93
+    assert s.target_tier == "L3_SEMANTIC"
+
+
+def test_compression_result():
+    r = CompressionResult(
+        memory_id     = "mem-7",
+        compressed    = True,
+        before_tokens = 1200,
+        after_tokens  = 300,
+        summary       = "payment refactor summary",
+    )
+    assert r.compressed is True
+    assert r.after_tokens < r.before_tokens

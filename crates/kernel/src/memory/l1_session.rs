@@ -49,6 +49,10 @@ impl L1SessionMemory {
     pub fn len(&self) -> usize {
         self.inner.read().expect("l1 read lock").len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.read().expect("l1 read lock").is_empty()
+    }
 }
 
 impl Default for L1SessionMemory {

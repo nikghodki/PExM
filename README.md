@@ -4,6 +4,8 @@
 
 ContextOS sits between AI agents and enterprise data systems to provide scalable, safe, and high-performance memory orchestration. It keeps agents grounded in your codebase, reduces hallucinations, cuts token usage, and gives every memory operation a full audit trail.
 
+**Documentation:** [Architecture](docs/ARCHITECTURE.md) · [Python SDK](docs/SDK.md) · [Deployment](docs/DEPLOYMENT.md) · [Contributing](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md)
+
 ---
 
 ## Why ContextOS
@@ -101,7 +103,7 @@ ContextOS sits between AI agents and enterprise data systems to provide scalable
 ### 1. Clone and enter the project
 
 ```bash
-git clone <repo-url> contextos
+git clone https://github.com/contextos/contextos.git
 cd contextos
 ```
 
@@ -144,8 +146,8 @@ cd ../..
 
 Expected output:
 ```
-test result: ok. X passed; 0 failed    (Rust)
-10 passed                               (Python)
+test result: ok. N passed; 0 failed    (Rust — unit + integration)
+25 passed                               (Python)
 ```
 
 ### 6. Start the local stack (optional)
@@ -244,6 +246,22 @@ for r in results:
 client.close()
 ```
 
+The SDK exposes all six subsystems:
+
+```python
+client.memory    # store / get / search / promote / delete / list
+client.indexer  # index_repo / query_symbols / get_symbol /
+                # get_commit_diff / query_function_deltas
+client.policy   # check_permission / create_role / assign_role /
+                # list_audit_events / stream_audit_events
+client.context  # schedule_context / get_window / evict / close_session
+client.bus      # publish / subscribe (server-streaming)
+client.optimizer# promotion_suggestions / trigger_compression
+```
+
+A runnable end-to-end example that exercises every subsystem is in
+[examples/agent_with_contextos.py](examples/agent_with_contextos.py).
+
 ---
 
 ## Development
@@ -287,25 +305,38 @@ make docker-up      # start local infra stack
 make docker-down    # stop and remove containers
 ```
 
+### What is implemented today
+
+All six gRPC services are wired into the server (`crates/server/src/main.rs`)
+and are exercised by the integration test suite: `memory`, `indexer`,
+`policy`, `context` (scheduler), `bus`, and `optimizer`. The Python SDK
+exposes all of them under `client.memory`, `client.indexer`, `client.policy`,
+`client.context`, `client.bus`, and `client.optimizer`.
+
+Two features are intentional stubs awaiting your model/integration:
+
+- **LLM-assisted compression** (`optimizer`): the plumbing and `zstd`
+  compression are real; the summarization step is a hook you wire to a model.
+- **Multi-region sync** (`crdt`): the LWW register and OR-Set primitives are
+  implemented and tested, but a live multi-node deployment has not been
+  exercised yet.
+
 ### Adding a new gRPC service
 
-1. Add the `.proto` file to `proto/`
-2. Create a new crate under `crates/your-service/`
-3. Add `tonic_build::compile_protos("../../proto/your-service.proto")` to its `build.rs`
-4. Implement the service trait in `crates/server/src/your_svc.rs`
-5. Register it in `crates/server/src/main.rs` with `.add_service(...)`
-
-### Wiring real gRPC services
-
-The server currently runs with a health-check placeholder. To add a real service after `cargo build` runs codegen:
+1. Add the `.proto` file to `proto/`.
+2. Create a crate under `crates/your-service/` and add
+   `tonic_build::compile_protos("../../proto/your-service.proto")` to its
+   `build.rs`.
+3. Implement the service trait in `crates/server/src/your_svc.rs`.
+4. Register it in `crates/server/src/main.rs` with `.add_service(...)`.
+5. Regenerate the Python stubs (`make proto-python`) and add a client under
+   `sdk/python/contextos/client.py`.
 
 ```rust
-// In crates/server/src/main.rs, after cargo build generates stubs:
-use proto::memory::memory_service_server::MemoryServiceServer;
-
+// In crates/server/src/main.rs, after `cargo build` generates the stubs:
 Server::builder()
     .add_service(health_svc)
-    .add_service(MemoryServiceServer::new(memory_svc))   // ← add this
+    .add_service(MemoryServiceServer::new(memory_svc))   // ← add your service here
     .serve(addr)
     .await?;
 ```
@@ -314,23 +345,23 @@ Server::builder()
 
 ## Roadmap
 
-### Phase 1 — Foundation (0–3 months) ✅ Scaffolded
+### Phase 1 — Foundation ✅
 - [x] Rust memory kernel (L1–L4 tiered storage)
 - [x] tree-sitter code indexer
 - [x] Git diff / function-delta tracking
-- [x] gRPC API server skeleton
+- [x] gRPC API server (all six services)
 - [x] Python SDK
 
-### Phase 2 — Multi-agent (3–6 months) ✅ Scaffolded
+### Phase 2 — Multi-agent ✅
 - [x] Enterprise memory graph (petgraph)
 - [x] RBAC policy engine + audit log
 - [x] Distributed memory bus (tokio broadcast / Kafka)
 - [x] Token-aware context scheduler
 
-### Phase 3 — Self-optimizing (6–12 months) ✅ Scaffolded
+### Phase 3 — Self-optimizing 🔶
 - [x] Access-pattern predictor + promotion scheduling
-- [x] LLM-assisted compression (stub — wire your model)
-- [x] CRDT-based multi-region sync (LWW + OR-Set)
+- [ ] LLM-assisted compression — **stub, wire your model**
+- [ ] CRDT-based multi-region sync — primitives done, **multi-node untested**
 - [x] Kubernetes deploy manifests + Helm chart
 - [x] Prometheus + Grafana + Jaeger observability
 
