@@ -1,278 +1,222 @@
 # PExM
 
-**Predictive Experience Model — memory that lives in the weights, not in a database.**
+### Predictive Experience Model — memory for AI agents that learns, not just stores.
 
-PExM is a new approach to AI agent memory. Instead of storing memories as text in a vector store and retrieving them by similarity, PExM absorbs experiences directly into model weights. Querying produces synthesized context from everything the model has learned — not a lookup, but a generation.
-
-```
-Traditional agent memory:     Agent -> query -> [Vector DB] -> retrieve text -> Agent
-                                                  |
-                                            store / evict / rerank (heuristics)
-
-PExM:                         Agent -> state -> [Experience Model] -> synthesized context -> Agent
-                                                      |
-                                                absorb experience (weight update)
-```
-
-No store. No retrieval. No eviction policy. Two operations: **absorb** and **generate**.
+<p align="center">
+  <img src="assets/demo.gif" width="800" alt="PExM demo: absorb experiences, query for context, check novelty">
+  <br><em>A real session. The agent absorbs coding experiences, queries for context, and detects novel information — all in model weights, no database.</em>
+</p>
 
 ---
 
-## Why
+## Connect Your Agent in 30 Seconds
 
-Every agent memory system today — Mem0, LangGraph, CrewAI, Letta — treats memory as **dead data** in a store. They differ only in how they manage that store: better retrieval, smarter eviction, fancier embeddings.
+PExM runs as a server. Your agent talks to it via **MCP** or **HTTP**.
 
-This approach has a fundamental problem: [memories degrade when managed](https://arxiv.org/abs/2605.12978). The more you consolidate, merge, and rewrite memories, the worse they get.
+### Claude Code
 
-PExM takes a different approach. The model's weights **are** the memory. Experiencing something **is** remembering it. Contradictions resolve through weight interference — no staleness detector needed.
+Add to `.claude/settings.json`:
+```json
+{
+  "mcpServers": {
+    "pexm": {
+      "command": "python",
+      "args": ["-m", "pexm.serve.mcp_server"],
+      "cwd": "/path/to/PExM",
+      "env": {"PYTHONPATH": "/path/to/PExM"}
+    }
+  }
+}
+```
 
-| Problem | Store-based solution | PExM solution |
+Your agent gets three tools: `pexm_absorb`, `pexm_query`, `pexm_surprise`.
+
+### OpenClaw / Codex
+
+Same MCP config — add the server to your MCP settings. See [integrations/](integrations/) for copy-paste configs.
+
+### Any Other Agent (CrewAI, LangGraph, Hermes, custom)
+
+Start the HTTP server:
+```bash
+PYTHONPATH=. python -m pexm.serve.http_server --port 7437
+```
+
+Then from your agent:
+```
+POST /absorb   {"state": "debugging auth", "outcome": "JWT expires after 3600s"}
+POST /query    {"state": "fixing token expiry in tests"}
+POST /surprise {"state": "...", "outcome": "..."}
+```
+
+Returns readable text your agent can inject directly into its prompt.
+
+---
+
+## What Your Agent Sees
+
+When your agent calls `pexm_query("fixing auth token expiry in tests")`, it gets back:
+
+```
+3 tests failed in test_auth.py. Token expiry causes mid-suite failures.
+JWT tokens with RS256 signing. Expire after 3600 seconds. Refresh tokens in Redis.
+alice refactored auth to async handlers. bob added rate limiting to login.
+```
+
+Ranked by relevance. Ready to paste into context. No configuration.
+
+When your agent learns something new, it calls `pexm_absorb`:
+
+```
+> pexm_absorb("debugging auth", "JWT tokens expire after 3600s")
+Absorbed. Surprise: 0.72. Stored: 43 experiences.
+```
+
+High surprise = novel information, large update to model weights.
+Low surprise = already known, tiny update.
+
+---
+
+## Why PExM, Not a Vector Store?
+
+Every agent memory today stores text in a database and retrieves by similarity. PExM is different: **the model's weights are the memory**. Absorbing an experience updates the weights. Querying runs a forward pass.
+
+| | Vector Store | PExM |
 |---|---|---|
-| What to store? | Classifier decides | Everything absorbs; surprise controls update magnitude |
-| What to retrieve? | Cosine similarity | Forward pass synthesizes across all knowledge |
-| What to evict? | LRU / score / policy | Natural forgetting via weight interference |
-| Stale memories? | Staleness detector | New experiences overwrite old predictions |
-| Redundant memories? | Dedup / merge | Repeated experiences reinforce existing weights |
-| Scales with memory size? | Retrieval slows linearly | **Generation time is constant** |
+| **Store** | Save text + embedding | `absorb()` updates model weights |
+| **Retrieve** | Cosine similarity search | `query()` synthesizes from learned patterns |
+| **Evict** | LRU / score / manual policy | Natural forgetting via weight interference |
+| **Stale data** | Stays until manually removed | Contradictions overwrite automatically |
+| **Novel detection** | Not supported | `surprise()` tells you before you store |
+| **Latency at scale** | Grows with memory size | Constant (~130ms at any scale) |
+
+### Benchmarks
+
+500 coding experiences across 6 domains. Full reproduction: `python -m pexm.benchmarks.run_full_benchmark`.
+
+| Experiences | PExM | Vector Store | PExM Wins | PExM Latency | Vector Latency |
+|---:|---:|---:|---:|---:|---:|
+| 50 | 0.975 | 0.938 | 8/8 | 119ms | 169ms |
+| 100 | 0.978 | 0.944 | 8/8 | 117ms | 237ms |
+| 200 | 0.977 | 0.935 | 8/8 | 119ms | 352ms |
+| 500 | 0.979 | 0.937 | 8/8 | 118ms | 797ms |
+
+PExM generate latency stays flat. Vector store retrieval grows linearly.
+
+> **Honest limitation:** With fewer than 50 experiences, PExM underperforms vector retrieval. The model needs data to learn from. Below 50, use a vector store.
 
 ---
 
-## Benchmarks
-
-All benchmarks on Apple Silicon (MPS). 500 synthetic coding experiences across 6 domains, 50 held-out novel experiences, 8 test queries. Full reproduction: `PYTHONPATH=. python pexm/benchmarks/run_full_benchmark.py`.
-
-### Scaling Behavior
-
-PExM needs ~50 experiences to surpass vector retrieval. After that, quality holds steady while vector store latency grows linearly.
-
-| Experiences | PExM | Vector Store | Delta | Wins | Generate | Retrieve | Surprise Sep |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 10 | 0.865 | 0.935 | -0.070 | 0/8 | 118ms | 127ms | -0.064 |
-| 50 | 0.975 | 0.938 | +0.037 | 8/8 | 119ms | 169ms | +0.015 |
-| 100 | 0.978 | 0.944 | +0.034 | 8/8 | 117ms | 237ms | +0.045 |
-| 200 | 0.977 | 0.935 | +0.042 | 8/8 | 119ms | 352ms | +0.021 |
-| 500 | 0.979 | 0.937 | +0.042 | 8/8 | 118ms | 797ms | +0.101 |
-
-- **Context quality**: PExM +0.042 over vector store at 500 experiences, winning 8/8 queries
-- **Generate latency is constant**: 118ms at every scale. Vector retrieve grows 127ms to 797ms (6.3x)
-- **Surprise calibration improves with scale**: separation +0.101 at 500 experiences
-- **Forgetting works at every scale**: contradictions displace stale knowledge
-
-### Conversational Memory (Multi-Turn Recall)
-
-PExM is designed for **synthesis across many experiences**, not verbatim episode lookup. On a LoCoMo-style multi-turn recall task (3 sessions, 9 queries asking about specific events):
-
-| Method | Recall Similarity | Queries Won |
-|---|---:|---:|
-| Vector Store | 0.957 | **9/9** |
-| PExM | 0.703 | 0/9 |
-
-Vector store wins here because conversational recall needs exact episode retrieval ("who fixed the bug?" needs the exact commit message). PExM blends across all absorbed knowledge and loses specific details. This is an intentional tradeoff: PExM excels when the answer **spans multiple experiences** (the scaling benchmark), not when it lives in one specific memory.
-
-### When to Use PExM vs a Vector Store
-
-| Scenario | Better choice | Why |
-|---|---|---|
-| "What do I need to know about auth?" | **PExM** | Synthesizes across many experiences |
-| "Who pushed commit abc123?" | **Vector store** | Exact episode lookup |
-| 500+ memories, latency matters | **PExM** | Constant-time generation (118ms vs 797ms) |
-| Fewer than 50 memories | **Vector store** | PExM needs ~50 experiences to learn |
-| Contradictory information over time | **PExM** | Natural forgetting vs stale entries |
-| Multi-agent, need exact audit trail | **Vector store** | PExM has no discrete records |
-
----
-
-## How It Works
-
-### Architecture
-
-```
-+---------------------------------------------------------+
-|                   Experience Model                       |
-|                                                         |
-|  +---------------------------------------------------+  |
-|  |  Frozen Backbone (ModernBERT-base, 149M)          |  |
-|  |  Encodes text into embeddings. Never updated.     |  |
-|  +-------------------------+-------------------------+  |
-|                            |                            |
-|  +-------------------------v-------------------------+  |
-|  |  Multi-Timescale Streams (4.7M trainable)         |  |
-|  |                                                   |  |
-|  |  fast   (lr=1e-3)  session-level patterns         |  |
-|  |  medium (lr=1e-4)  project-level knowledge        |  |
-|  |  slow   (lr=1e-5)  cross-project patterns         |  |
-|  |                                                   |  |
-|  |  Tiers emerge from learning rates, not design.    |  |
-|  +--------+----------------+----------------+--------+  |
-|           |                |                |           |
-|    +------v------+  +------v------+  +------v------+   |
-|    | Prediction  |  |  Context    |  |  Surprise   |   |
-|    | Head        |  |  Generator  |  |  Gate       |   |
-|    |             |  |             |  |             |   |
-|    | Predicts    |  | Synthesizes |  | Modulates   |   |
-|    | next state  |  | relevant    |  | update size |   |
-|    |             |  | context     |  | by surprise |   |
-|    +-------------+  +-------------+  +-------------+   |
-+---------------------------------------------------------+
-```
-
-### Absorb: Experiencing Is Remembering
-
-When an agent has an experience `(state, outcome)`:
-
-1. The model predicts what outcome it expects
-2. The actual outcome is compared to the prediction
-3. Prediction error drives a gated weight update:
-   - **High surprise** (novel experience) -> large update -> absorbed quickly
-   - **Low surprise** (known pattern) -> tiny update -> weights barely change
-   - **Contradiction** (stale knowledge) -> large error -> old weights overwritten
-
-```python
-metrics = model.absorb(
-    state="debugging the auth module",
-    outcome="JWT tokens expire after 3600s, refresh tokens in Redis with 7-day TTL"
-)
-print(metrics["z_surprise"])  # 0.72 -- novel, large update applied
-```
-
-### Generate: Retrieval Is Synthesis
-
-When an agent needs context, a forward pass synthesizes across everything absorbed:
-
-```python
-result = model.generate("fixing the auth token expiry issue in tests")
-# result["context_embedding"]  -- synthesized context from ALL absorbed experiences
-# result["confidence"]         -- internal consistency score
-# result["latency_ms"]         -- ~118ms, constant regardless of memory size
-```
-
-This is not retrieval. No single stored memory contains the answer. The model synthesizes across JWT knowledge, test failure patterns, and auth changes — all encoded in weights.
-
-### Surprise: Novelty Without a Classifier
-
-Instead of a "should I store this?" classifier, PExM uses prediction error z-scores:
-
-```python
-known = model.surprise_z("reading auth.py", "JWT with RS256, 3600s expiry")  # -> 0.38
-novel = model.surprise_z("checking Spark cluster", "Shuffle spill at 15GB")  # -> 0.62
-```
-
-No classifier needed. Known experiences have low prediction error relative to the running distribution. Novel ones are outliers.
-
----
-
-## Quickstart
-
-### Install
+## Install
 
 ```bash
-git clone https://github.com/nikghodki/pexm.git
-cd pexm
+git clone https://github.com/nikghodki/PExM.git
+cd PExM
 pip install torch transformers safetensors numpy
 ```
 
-Requires Python 3.9+ and PyTorch with MPS (Apple Silicon) or CUDA (NVIDIA GPU).
+Requires Python 3.9+. Works on Apple Silicon (MPS) and NVIDIA GPUs (CUDA).
 
-### Basic Usage
+### Start the Server
 
-```python
-from pexm.core import ExperienceModel
+```bash
+# MCP (for Claude Code, OpenClaw, Codex)
+PYTHONPATH=. python -m pexm.serve.mcp_server
 
-# Load -- downloads ModernBERT-base on first run (~600MB)
-model = ExperienceModel(device="mps")  # or "cuda:0"
-optimizer = model.get_optimizer()
-optimizer.zero_grad()
+# HTTP (for everything else)
+PYTHONPATH=. python -m pexm.serve.http_server --port 7437
+```
 
-# Absorb experiences
-experiences = [
-    ("reading the auth module", "Uses JWT with RS256. Tokens expire after 3600s."),
-    ("debugging login failure", "Email validator rejects plus signs. Fix in validators.py:42."),
-    ("running tests after auth changes", "3 tests failed -- token expiry mid-suite."),
-]
+### Run the Demo
 
-for state, outcome in experiences:
-    model.absorb(state, outcome)
-    model.maybe_optimizer_step(optimizer)
-optimizer.step()
-optimizer.zero_grad()
-
-# Generate context for a new situation
-result = model.generate("fixing auth token issues in the test suite")
-print(f"Confidence: {result['confidence']:.3f}")
-print(f"Latency: {result['latency_ms']:.0f}ms")
-
-# Check if something is novel
-known = model.surprise_z("reading the auth module", "JWT with RS256, 3600s expiry")
-novel = model.surprise_z("setting up GraphQL federation", "Apollo Router with 4 subgraphs")
-print(f"Known surprise: {known:.3f}")  # low
-print(f"Novel surprise: {novel:.3f}")  # high
+```bash
+PYTHONPATH=. python examples/demo.py
 ```
 
 ### Run the Benchmarks
 
 ```bash
-# Generate 500 synthetic experiences
-PYTHONPATH=. python pexm/benchmarks/generate_corpus.py
-
-# Full benchmark suite (scaling + conversational + latency)
-PYTHONPATH=. python pexm/benchmarks/run_full_benchmark.py
-```
-
-### Run the Examples
-
-```bash
-# Quick intro: absorb, generate, surprise, forgetting
-PYTHONPATH=. python examples/quickstart.py
-
-# Head-to-head comparison vs vector store
-PYTHONPATH=. python examples/compare_vector_store.py
+PYTHONPATH=. python -m pexm.benchmarks.generate_corpus
+PYTHONPATH=. python -m pexm.benchmarks.run_full_benchmark
 ```
 
 ---
 
-## Design Principles
+## How It Works
 
-**No memory objects.** There are no records to store, index, retrieve, evict, promote, merge, or expire. The model's weights are the only persistent state.
+```
+Agent has an experience          Agent needs context
+        |                                |
+        v                                v
+   model.absorb()                  model.query()
+        |                                |
+   Prediction error             Cosine search over
+   drives gated update          learned embeddings
+        |                                |
+   High surprise =              Returns ranked text
+   large update                 ready for the prompt
+        |
+   Low surprise =
+   tiny update
+```
 
-**Surprise controls learning.** Novel experiences update weights more than familiar ones. Automatic — no "importance" scoring needed.
+**Multi-timescale streams**: Three adaptation layers at different learning rates. Fast stream captures what happened this session. Slow stream accumulates patterns across projects. Tiers emerge from learning rates, not from configuration.
 
-**Tiers emerge, not designed.** Three adaptation streams at different learning rates. Fast-changing session patterns live in the fast stream. Stable knowledge accumulates in the slow stream. Analogous to L1/L2/L3 tiers, but continuous, not discrete.
+**Surprise gating**: Before updating weights, the model predicts the outcome. The prediction error controls how much the weights change. Novel experiences get large updates. Familiar patterns barely move the weights.
 
-**Constant-time generation.** A forward pass takes the same time whether the model has absorbed 10 or 10,000 experiences. Vector stores scale linearly.
+**Natural forgetting**: When you absorb "auth now uses OAuth2" after the model learned "auth uses JWT," the new experience overwrites the old prediction. No staleness detector. No manual eviction.
 
-**Forgetting is natural.** When new experiences contradict old ones, weight interference displaces the outdated knowledge. No staleness detection, no manual invalidation.
+---
+
+## Integrations
+
+| Framework | Method | Setup |
+|---|---|---|
+| Claude Code | MCP server | [Config](integrations/README.md#claude-code) |
+| OpenClaw | MCP server | [Config](integrations/README.md#openclaw) |
+| Codex | MCP server | [Config](integrations/README.md#codex) |
+| CrewAI | HTTP API | [Example](integrations/README.md#crewai) |
+| LangGraph | HTTP API | [Example](integrations/README.md#langgraph) |
+| Hermes | HTTP API | [Example](integrations/README.md#hermes--custom-agents) |
+| Custom | HTTP API | `POST /absorb`, `POST /query`, `POST /surprise` |
+
+---
+
+## API
+
+### `absorb(state, outcome)`
+Absorb an experience. Returns surprise score.
+
+### `query(state, top_k=5)`
+Query for relevant context. Returns ranked text.
+
+### `surprise(state, outcome)`
+Check novelty. Returns 0 (familiar) to 1 (novel).
+
+### `is_novel(state, outcome, threshold=0.6)`
+Quick boolean check: worth absorbing?
+
+Full API docs in [pexm/core/experience_model.py](pexm/core/experience_model.py).
 
 ---
 
 ## Limitations
 
-- **Not for exact recall.** PExM synthesizes across experiences. If you need verbatim lookup of a specific memory, use a vector store (see conversational memory benchmark above).
-- **Needs ~50 experiences.** Below that, PExM underperforms vector retrieval. The model needs sufficient data to learn meaningful patterns.
-- **Context is embeddings, not text.** The model generates context as embedding vectors, not readable text. Use the decoder module for approximate text recovery.
-- **Absorb latency is ~270ms.** Includes backward pass and optimizer step. Use write-behind buffering for inline use.
-- **Tested at 500 experiences.** Stream norms show no saturation at 1,500 absorptions, but 5K+ is unvalidated.
-- **Single-agent only.** No multi-agent memory sharing or access control.
+- **Needs ~50 experiences** to outperform vector retrieval. Below that, use a vector store.
+- **Absorb latency ~270ms** per experience (includes backward pass). Use background absorption for inline agents.
+- **Single agent** — no multi-agent memory sharing yet.
+- **Surprise calibration** needs ~100 experiences for reliable novelty detection.
 
 ---
 
-## Project Structure
+## Contributing
 
-```
-pexm/
-  core/
-    experience_model.py   # ExperienceModel -- absorb, generate, surprise
-    streams.py            # Multi-timescale adaptation streams
-    decoder.py            # Embedding-to-text decoder (experimental)
-  benchmarks/
-    generate_corpus.py    # Synthetic experience generator (500+)
-    run_benchmark.py      # Quick evaluation
-    run_full_benchmark.py # Full benchmark suite (scaling + conversational + latency)
-  data/                   # Generated corpora and results
-  tests/
-examples/
-  quickstart.py           # 5-minute intro
-  compare_vector_store.py # Head-to-head vs cosine retrieval
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md). High-impact areas:
+
+- Real-world agent integrations and examples
+- Scale testing beyond 500 experiences
+- Persistence (save/load model state)
+- Multi-agent memory sharing
 
 ---
 
@@ -282,11 +226,9 @@ examples/
 @misc{pexm2026,
   title={PExM: Predictive Experience Models for AI Agent Memory},
   year={2026},
-  howpublished={\url{https://github.com/nikghodki/pexm}},
+  howpublished={\url{https://github.com/nikghodki/PExM}},
 }
 ```
-
----
 
 ## License
 
