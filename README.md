@@ -103,7 +103,7 @@ ContextOS sits between AI agents and enterprise data systems to provide scalable
 ### 1. Clone and enter the project
 
 ```bash
-git clone https://github.com/contextos/contextos.git
+git clone https://github.com/nikghodki/contextos.git
 cd contextos
 ```
 

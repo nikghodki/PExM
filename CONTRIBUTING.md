@@ -25,7 +25,7 @@ rustup installs them automatically on first build.
 ## Development setup
 
 ```bash
-git clone <repo-url> contextos
+git clone https://github.com/nikghodki/contextos.git
 cd contextos
 
 # Compile every crate
