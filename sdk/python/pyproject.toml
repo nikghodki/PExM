@@ -1,0 +1,35 @@
+[build-system]
+requires      = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name        = "contextos"
+version     = "0.1.0"
+description = "ContextOS Python SDK — gRPC client for the enterprise AI memory OS"
+license     = { text = "MIT OR Apache-2.0" }
+requires-python = ">=3.10"
+
+dependencies = [
+    "grpcio>=1.62.0",
+    "grpcio-tools>=1.62.0",
+    "protobuf>=4.25.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "mypy>=1.8",
+    "ruff>=0.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["contextos"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths    = ["tests"]
+
+[tool.ruff]
+line-length = 100
+select      = ["E", "F", "I"]

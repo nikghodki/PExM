@@ -1,0 +1,27 @@
+# ── Build artifacts ────────────────────────────────────────────────────────────
+/target
+/dist
+
+# ── Runtime data (never commit) ───────────────────────────────────────────────
+contextos-data/
+.ptron/
+*.log
+.env
+
+# ── Editor / OS ────────────────────────────────────────────────────────────────
+.DS_Store
+
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.pytest_cache/
+sdk/python/.venv/
+sdk/python/dist/
+sdk/python/*.egg-info/
+
+# ── Vendored subchart (generated) ─────────────────────────────────────────────
+deploy/helm/contextos/charts/
+
+# NOTE: Cargo.lock IS committed on purpose. This is a binary (server + CLI), and
+# the Dockerfile runs `cargo fetch --locked`. A lock file guarantees reproducible
+# builds across contributors and CI.

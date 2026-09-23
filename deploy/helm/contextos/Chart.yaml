@@ -1,0 +1,11 @@
+apiVersion: v2
+name:        contextos
+description: Enterprise AI Memory OS — Helm chart
+type:        application
+version:     0.1.0
+appVersion:  "0.1.0"
+keywords:
+  - ai
+  - memory
+  - grpc
+  - enterprise

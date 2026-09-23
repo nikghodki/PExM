@@ -1,0 +1,30 @@
+[package]
+name        = "contextos-indexer"
+description = "ContextOS code memory engine: AST indexing via tree-sitter + git integration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio        = { workspace = true }
+tonic        = { workspace = true }
+prost        = { workspace = true }
+prost-types  = { workspace = true }
+tree-sitter  = { workspace = true }
+git2         = { workspace = true }
+petgraph     = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+uuid         = { workspace = true }
+chrono       = { workspace = true }
+tracing      = { workspace = true }
+anyhow       = { workspace = true }
+thiserror    = { workspace = true }
+
+# Language grammars
+tree-sitter-rust   = "0.21"
+tree-sitter-python = "0.21"
+
+[build-dependencies]
+tonic-build = { version = "0.12" }

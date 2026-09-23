@@ -1,0 +1,94 @@
+syntax = "proto3";
+package contextos.policy.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+option java_package        = "io.contextos.policy.v1";
+option java_multiple_files = true;
+
+// ─── RBAC types ───────────────────────────────────────────────────────────────
+enum Action {
+  ACTION_UNSPECIFIED = 0;
+  READ               = 1;
+  WRITE              = 2;
+  DELETE             = 3;
+  ADMIN              = 4;
+}
+
+enum Effect {
+  EFFECT_UNSPECIFIED = 0;
+  ALLOW              = 1;
+  DENY               = 2;
+}
+
+message Role {
+  string   id          = 1;
+  string   name        = 2;
+  repeated string permissions = 3;   // resource patterns, e.g. "memory:*"
+}
+
+message PolicyRule {
+  string   id         = 1;
+  string   role_id    = 2;
+  string   resource   = 3;   // glob pattern
+  Action   action     = 4;
+  Effect   effect     = 5;
+  int32    priority   = 6;
+}
+
+// ─── Audit types ──────────────────────────────────────────────────────────────
+message AuditEvent {
+  string   id           = 1;
+  string   principal_id = 2;
+  string   resource     = 3;
+  Action   action       = 4;
+  Effect   outcome      = 5;
+  string   details      = 6;
+  string   ip_address   = 7;
+  google.protobuf.Timestamp occurred_at = 8;
+}
+
+// ─── Requests / Responses ─────────────────────────────────────────────────────
+message CheckPermissionRequest {
+  string principal_id = 1;
+  string resource     = 2;
+  Action action       = 3;
+}
+message CheckPermissionResponse {
+  Effect effect  = 1;
+  string rule_id = 2;
+  string reason  = 3;
+}
+
+message CreateRoleRequest  { Role role = 1; }
+message CreateRoleResponse { string id = 1; bool success = 2; }
+
+message AssignRoleRequest {
+  string principal_id = 1;
+  string role_id      = 2;
+}
+
+message ListAuditEventsRequest {
+  string   principal_id = 1;
+  google.protobuf.Timestamp from = 2;
+  google.protobuf.Timestamp to   = 3;
+  int32    page_size   = 4;
+  string   page_token  = 5;
+}
+message ListAuditEventsResponse {
+  repeated AuditEvent events = 1;
+  string next_page_token     = 2;
+}
+
+message StreamAuditRequest { string principal_id = 1; }
+
+// ─── Service ──────────────────────────────────────────────────────────────────
+service PolicyService {
+  rpc CheckPermission     (CheckPermissionRequest)  returns (CheckPermissionResponse);
+  rpc CreateRole          (CreateRoleRequest)       returns (CreateRoleResponse);
+  rpc AssignRole          (AssignRoleRequest)       returns (google.protobuf.Empty);
+  rpc RecordAuditEvent    (AuditEvent)              returns (google.protobuf.Empty);
+  rpc ListAuditEvents     (ListAuditEventsRequest)  returns (ListAuditEventsResponse);
+  rpc StreamAuditEvents   (StreamAuditRequest)      returns (stream AuditEvent);
+}

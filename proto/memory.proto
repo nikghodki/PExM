@@ -1,0 +1,99 @@
+syntax = "proto3";
+package contextos.memory.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+option java_package        = "io.contextos.memory.v1";
+option java_multiple_files = true;
+
+// ─── Memory tier classification ───────────────────────────────────────────────
+enum MemoryTier {
+  MEMORY_TIER_UNSPECIFIED = 0;
+  L1_SESSION              = 1;  // hot, ephemeral
+  L2_TASK                 = 2;  // structured task memory
+  L3_SEMANTIC             = 3;  // graph-linked semantic
+  L4_ARCHIVE              = 4;  // compressed archive
+}
+
+// ─── Scope visibility ─────────────────────────────────────────────────────────
+enum Scope {
+  SCOPE_UNSPECIFIED = 0;
+  PRIVATE           = 1;
+  TEAM              = 2;
+  ORG               = 3;
+  EPHEMERAL         = 4;
+}
+
+// ─── Core memory entry ────────────────────────────────────────────────────────
+message MemoryEntry {
+  string   id          = 1;
+  string   agent_id    = 2;
+  string   content     = 3;
+  bytes    embedding   = 4;   // serialized f32 vector
+  MemoryTier tier      = 5;
+  Scope    scope       = 6;
+  float    score       = 7;
+  repeated string tags = 8;
+  map<string, string> metadata = 9;
+
+  google.protobuf.Timestamp created_at  = 10;
+  google.protobuf.Timestamp accessed_at = 11;
+  google.protobuf.Timestamp expires_at  = 12;
+}
+
+// ─── Requests / Responses ─────────────────────────────────────────────────────
+message StoreMemoryRequest {
+  string   agent_id  = 1;
+  string   content   = 2;
+  MemoryTier tier    = 3;
+  Scope    scope     = 4;
+  repeated string tags = 5;
+  map<string, string> metadata = 6;
+  optional string expires_in_secs = 7;
+}
+message StoreMemoryResponse {
+  string id    = 1;
+  bool   ok    = 2;
+  float  score = 3;
+}
+
+message GetMemoryRequest  { string id = 1; }
+message GetMemoryResponse { MemoryEntry entry = 1; }
+
+message SearchMemoryRequest {
+  string   agent_id   = 1;
+  string   query      = 2;
+  int32    top_k      = 3;
+  Scope    scope      = 4;
+  repeated string tags = 5;
+}
+message SearchMemoryResponse { repeated MemoryEntry results = 1; }
+
+message PromoteMemoryRequest  { string id = 1; MemoryTier target_tier = 2; }
+message PromoteMemoryResponse { bool ok = 1; MemoryTier new_tier = 2; }
+
+message DeleteMemoryRequest  { string id = 1; }
+message DeleteMemoryResponse { bool ok = 1; }
+
+message ListMemoriesRequest {
+  string   agent_id = 1;
+  MemoryTier tier   = 2;
+  Scope    scope    = 3;
+  int32    page_size = 4;
+  string   page_token = 5;
+}
+message ListMemoriesResponse {
+  repeated MemoryEntry entries = 1;
+  string next_page_token       = 2;
+}
+
+// ─── Service ──────────────────────────────────────────────────────────────────
+service MemoryService {
+  rpc StoreMemory   (StoreMemoryRequest)   returns (StoreMemoryResponse);
+  rpc GetMemory     (GetMemoryRequest)     returns (GetMemoryResponse);
+  rpc SearchMemory  (SearchMemoryRequest)  returns (SearchMemoryResponse);
+  rpc PromoteMemory (PromoteMemoryRequest) returns (PromoteMemoryResponse);
+  rpc DeleteMemory  (DeleteMemoryRequest)  returns (DeleteMemoryResponse);
+  rpc ListMemories  (ListMemoriesRequest)  returns (ListMemoriesResponse);
+}

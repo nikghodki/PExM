@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: contextos
+  labels:
+    app.kubernetes.io/name: contextos
+    app.kubernetes.io/managed-by: helm

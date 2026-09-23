@@ -1,0 +1,18 @@
+[package]
+name    = "integration"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+tokio         = { version = "1", features = ["full"] }
+tonic         = "0.12"
+prost         = "0.13"
+prost-types   = "0.13"
+uuid          = { version = "1", features = ["v4"] }
+anyhow        = "1"
+tempfile      = "3"
+
+
+[build-dependencies]
+tonic-build = { version = "0.12" }

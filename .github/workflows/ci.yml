@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Allow manual runs from the Actions tab
+  workflow_dispatch:
+
+# Fail the whole workflow if any step fails
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (fmt · clippy · test)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          protoc --version
+
+      # rust-toolchain.toml pins the stable toolchain, rustfmt + clippy
+      # components and the x86_64 / aarch64 target specs. rustup handles it.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The integration tests spawn the built server binary, so the workspace
+      # must be compiled before `cargo test`.
+      - name: Build workspace
+        run: cargo build --workspace
+
+      - name: Test (unit + integration)
+        run: cargo test --workspace
+
+  python-sdk:
+    name: Python SDK
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install dependencies
+        working-directory: sdk/python
+        run: pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        working-directory: sdk/python
+        run: ruff check .
+
+      - name: Test (pytest)
+        working-directory: sdk/python
+        run: python -m pytest tests/ -v

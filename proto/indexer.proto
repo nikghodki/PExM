@@ -1,0 +1,106 @@
+syntax = "proto3";
+package contextos.indexer.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option java_package        = "io.contextos.indexer.v1";
+option java_multiple_files = true;
+
+// ─── Symbol types ─────────────────────────────────────────────────────────────
+enum SymbolKind {
+  SYMBOL_KIND_UNSPECIFIED = 0;
+  FUNCTION                = 1;
+  CLASS                   = 2;
+  STRUCT                  = 3;
+  TRAIT                   = 4;
+  INTERFACE               = 5;
+  MODULE                  = 6;
+  VARIABLE                = 7;
+  CONSTANT                = 8;
+  TYPE_ALIAS              = 9;
+}
+
+message SymbolNode {
+  string     id          = 1;
+  string     repo_id     = 2;
+  string     file_path   = 3;
+  string     name        = 4;
+  string     qualified_name = 5;
+  SymbolKind kind        = 6;
+  int32      start_line  = 7;
+  int32      end_line    = 8;
+  string     signature   = 9;
+  string     docstring   = 10;
+  repeated string callers  = 11;
+  repeated string callees  = 12;
+  repeated string deps     = 13;   // cross-repo dependencies
+  map<string, string> metadata = 14;
+}
+
+// ─── Git diff types ────────────────────────────────────────────────────────────
+message CommitDiff {
+  string   commit_sha   = 1;
+  string   repo_id      = 2;
+  string   author       = 3;
+  string   message      = 4;
+  int64    timestamp    = 5;
+  repeated FileDiff files = 6;
+}
+
+message FileDiff {
+  string   path          = 1;
+  string   old_content   = 2;
+  string   new_content   = 3;
+  int32    added_lines   = 4;
+  int32    removed_lines = 5;
+}
+
+message FunctionDelta {
+  string   function_id  = 1;
+  string   commit_sha   = 2;
+  string   old_body     = 3;
+  string   new_body     = 4;
+  repeated string linked_test_ids = 5;
+}
+
+// ─── Requests / Responses ─────────────────────────────────────────────────────
+message IndexRepositoryRequest {
+  string   repo_id   = 1;
+  string   local_path = 2;
+  repeated string languages = 3;   // e.g. ["rust", "python"]
+  bool     incremental = 4;
+}
+message IndexRepositoryResponse {
+  bool   ok            = 1;
+  int64  symbols_added = 2;
+  int64  duration_ms   = 3;
+}
+
+message GetSymbolRequest  { string id = 1; }
+message GetSymbolResponse { SymbolNode symbol = 1; }
+
+message QuerySymbolsRequest {
+  string     repo_id  = 1;
+  string     query    = 2;
+  SymbolKind kind     = 3;
+  int32      top_k    = 4;
+}
+message QuerySymbolsResponse { repeated SymbolNode results = 1; }
+
+message GetCommitDiffRequest  { string repo_id = 1; string commit_sha = 2; }
+message GetCommitDiffResponse { CommitDiff diff = 1; }
+
+message QueryFunctionDeltasRequest {
+  string function_id = 1;
+  int32  limit       = 2;
+}
+message QueryFunctionDeltasResponse { repeated FunctionDelta deltas = 1; }
+
+// ─── Service ──────────────────────────────────────────────────────────────────
+service IndexerService {
+  rpc IndexRepository      (IndexRepositoryRequest)      returns (IndexRepositoryResponse);
+  rpc GetSymbol            (GetSymbolRequest)            returns (GetSymbolResponse);
+  rpc QuerySymbols         (QuerySymbolsRequest)         returns (QuerySymbolsResponse);
+  rpc GetCommitDiff        (GetCommitDiffRequest)        returns (GetCommitDiffResponse);
+  rpc QueryFunctionDeltas  (QueryFunctionDeltasRequest)  returns (QueryFunctionDeltasResponse);
+}

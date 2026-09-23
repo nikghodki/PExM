@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: contextos-config
+  namespace: contextos
+data:
+  CONTEXTOS_LOG:         "info"
+  CONTEXTOS_ROCKSDB_PATH: "/data/rocksdb"
+  KAFKA_BROKERS:         "kafka:9092"
