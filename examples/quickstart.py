@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Engram quickstart — absorb coding experiences, generate context, measure surprise."""
+"""PExM quickstart — absorb coding experiences, generate context, measure surprise."""
 
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-from engram.core import ExperienceModel
+from pexm.core import ExperienceModel
 
 def main():
     device = "mps" if torch.backends.mps.is_available() else "cuda:0" if torch.cuda.is_available() else "cpu"
-    print(f"Loading Engram on {device}...")
+    print(f"Loading PExM on {device}...")
 
     model = ExperienceModel(device=device)
     optimizer = model.get_optimizer()

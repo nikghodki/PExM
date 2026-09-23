@@ -8,6 +8,6 @@ build/
 *.bin
 *.safetensors
 .DS_Store
-engram/data/*.jsonl
-engram/data/*.json
-!engram/data/.gitkeep
+pexm/data/*.jsonl
+pexm/data/*.json
+!pexm/data/.gitkeep

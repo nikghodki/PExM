@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Side-by-side comparison: Engram vs naive vector store retrieval.
+"""Side-by-side comparison: PExM vs naive vector store retrieval.
 
 Absorbs the same experiences into both systems, then measures which
 produces better context for 5 test queries.
@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn.functional as F
-from engram.core import ExperienceModel
+from pexm.core import ExperienceModel
 
 
 EXPERIENCES = [
@@ -76,8 +76,8 @@ def main():
     optimizer.step()
     optimizer.zero_grad()
 
-    engram_wins = 0
-    print(f"{'Query':<40} {'No Mem':>7} {'Vector':>7} {'Engram':>7} {'Winner'}")
+    pexm_wins = 0
+    print(f"{'Query':<40} {'No Mem':>7} {'Vector':>7} {'PExM':>7} {'Winner'}")
     print("-" * 75)
 
     for query, ideal in QUERIES:
@@ -92,13 +92,13 @@ def main():
 
         eng_sim = model.context_similarity(query, ideal)
 
-        winner = "ENGRAM" if eng_sim > vec_sim else "VECTOR"
+        winner = "PEXM" if eng_sim > vec_sim else "VECTOR"
         if eng_sim > vec_sim:
-            engram_wins += 1
+            pexm_wins += 1
 
         print(f"{query:<40} {none_sim:>7.3f} {vec_sim:>7.3f} {eng_sim:>7.3f}   {winner}")
 
-    print(f"\nEngram wins: {engram_wins}/{len(QUERIES)}")
+    print(f"\nPExM wins: {pexm_wins}/{len(QUERIES)}")
 
 
 if __name__ == "__main__":

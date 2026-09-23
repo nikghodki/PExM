@@ -1,17 +1,17 @@
-# Engram
+# PExM
 
-**Memory that lives in the weights, not in a database.**
+**Predictive Experience Model — memory that lives in the weights, not in a database.**
 
-Engram is a predictive experience model for AI agents. Instead of storing memories as text objects in a vector store and retrieving them by similarity, Engram absorbs experiences directly into model weights. Querying it produces synthesized context from everything the model has learned — not a lookup, but a generation.
+PExM is a new approach to AI agent memory. Instead of storing memories as text in a vector store and retrieving them by similarity, PExM absorbs experiences directly into model weights. Querying produces synthesized context from everything the model has learned — not a lookup, but a generation.
 
 ```
-Traditional agent memory:     Agent → query → [Vector DB] → retrieve text → Agent
-                                                  ↑
+Traditional agent memory:     Agent -> query -> [Vector DB] -> retrieve text -> Agent
+                                                  |
                                             store / evict / rerank (heuristics)
 
-Engram:                       Agent → state → [Experience Model] → synthesized context → Agent
-                                                     ↑
-                                               absorb experience (weight update)
+PExM:                         Agent -> state -> [Experience Model] -> synthesized context -> Agent
+                                                      |
+                                                absorb experience (weight update)
 ```
 
 No store. No retrieval. No eviction policy. Two operations: **absorb** and **generate**.
@@ -20,20 +20,20 @@ No store. No retrieval. No eviction policy. Two operations: **absorb** and **gen
 
 ## Why
 
-Every agent memory system — Mem0, LangGraph, CrewAI, Letta — treats memory as **dead data** in a store. They differ only in how they manage that store: better retrieval, smarter eviction, fancier embeddings.
+Every agent memory system today — Mem0, LangGraph, CrewAI, Letta — treats memory as **dead data** in a store. They differ only in how they manage that store: better retrieval, smarter eviction, fancier embeddings.
 
-This approach has a fundamental problem: [memories degrade when managed](https://arxiv.org/abs/2605.12978). The more you consolidate, merge, and rewrite memories, the worse they get. GPT-5.4 fails on 54% of previously-solved problems after its own memory management runs.
+This approach has a fundamental problem: [memories degrade when managed](https://arxiv.org/abs/2605.12978). The more you consolidate, merge, and rewrite memories, the worse they get.
 
-Engram takes a different approach. The model's weights **are** the memory. Experiencing something **is** remembering it. Contradictions resolve through weight interference — no staleness detector needed.
+PExM takes a different approach. The model's weights **are** the memory. Experiencing something **is** remembering it. Contradictions resolve through weight interference — no staleness detector needed.
 
-| Problem | Vector store solution | Engram solution |
+| Problem | Store-based solution | PExM solution |
 |---|---|---|
 | What to store? | Classifier decides | Everything absorbs; surprise controls update magnitude |
 | What to retrieve? | Cosine similarity | Forward pass synthesizes across all knowledge |
 | What to evict? | LRU / score / policy | Natural forgetting via weight interference |
 | Stale memories? | Staleness detector | New experiences overwrite old predictions |
 | Redundant memories? | Dedup / merge | Repeated experiences reinforce existing weights |
-| Scales with memory size? | Retrieval slows linearly | Generation time is constant |
+| Scales with memory size? | Retrieval slows linearly | **Generation time is constant** |
 
 ---
 
@@ -47,37 +47,37 @@ Benchmarked on 500 synthetic coding experiences across 6 domains (auth, database
 |---|---|---|
 | No memory | 0.730 | 0/8 |
 | Vector store (top-5 cosine) | 0.937 | 0/8 |
-| **Engram** | **0.979** | **8/8** |
+| **PExM** | **0.979** | **8/8** |
 
-Engram produces context +0.042 closer to the ideal than vector retrieval on every query. The gap widens at scale because vector retrieval slows linearly with store size while Engram generation time is constant.
+PExM produces context +0.042 closer to the ideal than vector retrieval on every query. The gap widens at scale because vector retrieval slows linearly while PExM generation time is constant.
 
 ### Latency at 500 Memories
 
-| Operation | Engram | Vector Store |
+| Operation | PExM | Vector Store |
 |---|---|---|
 | Generate / Retrieve | **129ms** | 792ms |
 | Absorb / Store | 269ms | <1ms |
 
-Vector store writes are instant but reads get expensive. Engram writes are slower (online weight update) but reads are constant-time regardless of how much has been absorbed.
+Vector store writes are instant but reads get expensive. PExM writes are slower (online weight update) but reads are constant-time regardless of how much has been absorbed.
 
 ### Surprise Calibration
 
-Engram tracks prediction error statistics to distinguish known from novel experiences:
+PExM tracks prediction error statistics to distinguish known from novel experiences:
 
 | Category | Surprise score | Description |
 |---|---|---|
 | Known experiences | 0.422 | Low — model has absorbed this |
 | Novel experiences | 0.479 | Higher — never seen before |
-| Shuffled pairs | 0.442 | Middle — parts familiar, combination isn't |
+| Shuffled pairs | 0.442 | Middle — parts familiar, combination new |
 
 Separation improves with scale: +0.034 at 100 experiences, +0.096 at 500.
 
-### Forgetting
+### Natural Forgetting
 
 When contradictory information is absorbed (e.g., "auth rewritten from JWT to OAuth2"):
-- Old knowledge context similarity: 0.345 → 0.344 (faded)
-- New knowledge context similarity: 0.980 (immediately dominant)
-- Old knowledge surprise: increases (model finds stale info surprising)
+- Old knowledge context similarity fades
+- New knowledge becomes immediately dominant
+- Old knowledge surprise increases (model finds stale info surprising)
 
 No explicit eviction or staleness detection — contradictions resolve naturally.
 
@@ -88,35 +88,33 @@ No explicit eviction or staleness detection — contradictions resolve naturally
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Experience Model                          │
-│                                                             │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │  Frozen Backbone (ModernBERT-base, 149M)              │  │
-│  │  Encodes text into embeddings. Never updated.         │  │
-│  └──────────────────────┬────────────────────────────────┘  │
-│                         │                                    │
-│  ┌──────────────────────▼────────────────────────────────┐  │
-│  │  Multi-Timescale Streams (4.7M trainable params)      │  │
-│  │                                                       │  │
-│  │  fast   (lr=1e-3)  session-level patterns             │  │
-│  │  medium (lr=1e-4)  project-level knowledge            │  │
-│  │  slow   (lr=1e-5)  cross-project patterns             │  │
-│  │                                                       │  │
-│  │  Tiers emerge from learning rates, not from design.   │  │
-│  └──────────────────────┬────────────────────────────────┘  │
-│                         │                                    │
-│         ┌───────────────┼───────────────┐                    │
-│         ▼               ▼               ▼                    │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐           │
-│  │ Prediction  │ │  Context    │ │  Surprise   │           │
-│  │ Head        │ │  Generator  │ │  Gate       │           │
-│  │             │ │             │ │             │           │
-│  │ Predicts    │ │ Synthesizes │ │ Modulates   │           │
-│  │ next state  │ │ relevant    │ │ update size │           │
-│  │             │ │ context     │ │ by surprise │           │
-│  └─────────────┘ └─────────────┘ └─────────────┘           │
-└─────────────────────────────────────────────────────────────┘
++---------------------------------------------------------+
+|                   Experience Model                       |
+|                                                         |
+|  +---------------------------------------------------+  |
+|  |  Frozen Backbone (ModernBERT-base, 149M)          |  |
+|  |  Encodes text into embeddings. Never updated.     |  |
+|  +-------------------------+-------------------------+  |
+|                            |                            |
+|  +-------------------------v-------------------------+  |
+|  |  Multi-Timescale Streams (4.7M trainable)         |  |
+|  |                                                   |  |
+|  |  fast   (lr=1e-3)  session-level patterns         |  |
+|  |  medium (lr=1e-4)  project-level knowledge        |  |
+|  |  slow   (lr=1e-5)  cross-project patterns         |  |
+|  |                                                   |  |
+|  |  Tiers emerge from learning rates, not design.    |  |
+|  +--------+----------------+----------------+--------+  |
+|           |                |                |           |
+|    +------v------+  +------v------+  +------v------+   |
+|    | Prediction  |  |  Context    |  |  Surprise   |   |
+|    | Head        |  |  Generator  |  |  Gate       |   |
+|    |             |  |             |  |             |   |
+|    | Predicts    |  | Synthesizes |  | Modulates   |   |
+|    | next state  |  | relevant    |  | update size |   |
+|    |             |  | context     |  | by surprise |   |
+|    +-------------+  +-------------+  +-------------+   |
++---------------------------------------------------------+
 ```
 
 ### Absorb: Experiencing Is Remembering
@@ -126,16 +124,16 @@ When an agent has an experience `(state, outcome)`:
 1. The model predicts what outcome it expects
 2. The actual outcome is compared to the prediction
 3. Prediction error drives a gated weight update:
-   - **High surprise** (novel experience) → large update → absorbed quickly
-   - **Low surprise** (known pattern) → tiny update → weights barely change
-   - **Contradiction** (stale knowledge) → large error → old weights overwritten
+   - **High surprise** (novel experience) -> large update -> absorbed quickly
+   - **Low surprise** (known pattern) -> tiny update -> weights barely change
+   - **Contradiction** (stale knowledge) -> large error -> old weights overwritten
 
 ```python
 metrics = model.absorb(
     state="debugging the auth module",
     outcome="JWT tokens expire after 3600s, refresh tokens in Redis with 7-day TTL"
 )
-print(metrics["z_surprise"])  # 0.72 — novel, large update applied
+print(metrics["z_surprise"])  # 0.72 -- novel, large update applied
 ```
 
 ### Generate: Retrieval Is Synthesis
@@ -144,26 +142,23 @@ When an agent needs context, a forward pass synthesizes across everything absorb
 
 ```python
 result = model.generate("fixing the auth token expiry issue in tests")
-# result["context_embedding"] — synthesized context from ALL absorbed experiences
-# result["confidence"] — internal consistency score
-# result["latency_ms"] — ~129ms, constant regardless of memory size
+# result["context_embedding"]  -- synthesized context from ALL absorbed experiences
+# result["confidence"]         -- internal consistency score
+# result["latency_ms"]         -- ~129ms, constant regardless of memory size
 ```
 
-This is not retrieval. No single stored memory contains the answer. The model synthesizes across JWT token knowledge, test failure patterns, and recent auth changes — all encoded in weights.
+This is not retrieval. No single stored memory contains the answer. The model synthesizes across JWT knowledge, test failure patterns, and auth changes — all encoded in weights.
 
 ### Surprise: Novelty Without a Classifier
 
-Instead of a "should I store this?" classifier, Engram uses prediction error statistics:
+Instead of a "should I store this?" classifier, PExM uses prediction error z-scores:
 
 ```python
-# Known experience — low surprise
-model.surprise_z("reading auth.py", "JWT with RS256, 3600s expiry")  # → 0.38
-
-# Novel experience — high surprise
-model.surprise_z("checking the Spark cluster", "Shuffle spill at 15GB")  # → 0.62
-
-# No classifier needed. Surprise = prediction error z-score.
+known = model.surprise_z("reading auth.py", "JWT with RS256, 3600s expiry")  # -> 0.38
+novel = model.surprise_z("checking Spark cluster", "Shuffle spill at 15GB")  # -> 0.62
 ```
+
+No classifier needed. Known experiences have low prediction error relative to the running distribution. Novel ones are outliers.
 
 ---
 
@@ -172,8 +167,8 @@ model.surprise_z("checking the Spark cluster", "Shuffle spill at 15GB")  # → 0
 ### Install
 
 ```bash
-git clone https://github.com/your-org/engram.git
-cd engram
+git clone https://github.com/nikghodki/pexm.git
+cd pexm
 pip install torch transformers safetensors numpy
 ```
 
@@ -182,9 +177,9 @@ Requires Python 3.9+ and PyTorch with MPS (Apple Silicon) or CUDA (NVIDIA GPU).
 ### Basic Usage
 
 ```python
-from engram.core import ExperienceModel
+from pexm.core import ExperienceModel
 
-# Load — downloads ModernBERT-base on first run (~600MB)
+# Load -- downloads ModernBERT-base on first run (~600MB)
 model = ExperienceModel(device="mps")  # or "cuda:0"
 optimizer = model.get_optimizer()
 optimizer.zero_grad()
@@ -193,7 +188,7 @@ optimizer.zero_grad()
 experiences = [
     ("reading the auth module", "Uses JWT with RS256. Tokens expire after 3600s."),
     ("debugging login failure", "Email validator rejects plus signs. Fix in validators.py:42."),
-    ("running tests after auth changes", "3 tests failed — token expiry mid-suite."),
+    ("running tests after auth changes", "3 tests failed -- token expiry mid-suite."),
 ]
 
 for state, outcome in experiences:
@@ -218,10 +213,10 @@ print(f"Novel surprise: {novel:.3f}")  # high
 
 ```bash
 # Generate 500 synthetic experiences
-python -m engram.benchmarks.generate_corpus
+python -m pexm.benchmarks.generate_corpus
 
 # Run the full evaluation
-python -m engram.benchmarks.run_benchmark
+python -m pexm.benchmarks.run_benchmark
 ```
 
 ---
@@ -230,11 +225,11 @@ python -m engram.benchmarks.run_benchmark
 
 **No memory objects.** There are no records to store, index, retrieve, evict, promote, merge, or expire. The model's weights are the only persistent state.
 
-**Surprise controls learning.** Novel experiences update weights more than familiar ones. This is automatic — no "importance" scoring or storage decisions needed.
+**Surprise controls learning.** Novel experiences update weights more than familiar ones. Automatic — no "importance" scoring needed.
 
-**Tiers emerge, not designed.** The three adaptation streams have different learning rates. Fast-changing session patterns live in the fast stream. Stable cross-project knowledge accumulates in the slow stream. This is analogous to L1/L2/L3 memory tiers, but the boundaries are continuous, not discrete.
+**Tiers emerge, not designed.** Three adaptation streams at different learning rates. Fast-changing session patterns live in the fast stream. Stable knowledge accumulates in the slow stream. Analogous to L1/L2/L3 tiers, but continuous, not discrete.
 
-**Constant-time generation.** A forward pass takes the same time whether the model has absorbed 10 or 10,000 experiences. Vector stores scale linearly. This matters at production scale.
+**Constant-time generation.** A forward pass takes the same time whether the model has absorbed 10 or 10,000 experiences. Vector stores scale linearly.
 
 **Forgetting is natural.** When new experiences contradict old ones, weight interference displaces the outdated knowledge. No staleness detection, no manual invalidation.
 
@@ -242,32 +237,30 @@ python -m engram.benchmarks.run_benchmark
 
 ## Limitations
 
-**Context is embeddings, not text.** The model generates context as embedding vectors, not readable text. An agent using Engram needs to work with embeddings or use the decoder module for approximate text recovery.
-
-**Absorb latency is ~270ms.** This includes a backward pass and optimizer step. Acceptable for background absorption but too slow for synchronous inline use. Write-behind buffering is recommended.
-
-**Surprise calibration needs ~100 experiences.** Below that, the running statistics don't have enough data to distinguish known from novel reliably.
-
-**Tested at 500 experiences.** The architecture should scale further (stream norms show no saturation at 1,500 absorptions) but this hasn't been validated at 5K+.
-
-**Single-agent only.** No multi-agent memory sharing, access control, or visibility scoping. Each model instance is one agent's memory.
+- **Context is embeddings, not text.** The model generates context as embedding vectors, not readable text. Use the decoder module for approximate text recovery.
+- **Absorb latency is ~270ms.** Includes backward pass and optimizer step. Use write-behind buffering for inline use.
+- **Surprise calibration needs ~100 experiences.** Below that, running statistics lack sufficient data.
+- **Tested at 500 experiences.** Stream norms show no saturation at 1,500 absorptions, but 5K+ is unvalidated.
+- **Single-agent only.** No multi-agent memory sharing or access control.
 
 ---
 
 ## Project Structure
 
 ```
-engram/
-├── core/
-│   ├── experience_model.py   # ExperienceModel — absorb, generate, surprise
-│   ├── streams.py            # Multi-timescale adaptation streams
-│   └── decoder.py            # Embedding-to-text decoder (experimental)
-├── benchmarks/
-│   ├── generate_corpus.py    # Synthetic experience generator (500+)
-│   └── run_benchmark.py      # Full evaluation: context quality, calibration, latency
-├── data/                     # Generated corpora and benchmark results
-├── tests/                    # Unit tests
-└── examples/                 # Usage examples
+pexm/
+  core/
+    experience_model.py   # ExperienceModel -- absorb, generate, surprise
+    streams.py            # Multi-timescale adaptation streams
+    decoder.py            # Embedding-to-text decoder (experimental)
+  benchmarks/
+    generate_corpus.py    # Synthetic experience generator (500+)
+    run_benchmark.py      # Full evaluation suite
+  data/                   # Generated corpora and results
+  tests/
+examples/
+  quickstart.py           # 5-minute intro
+  compare_vector_store.py # Head-to-head vs cosine retrieval
 ```
 
 ---
@@ -275,10 +268,10 @@ engram/
 ## Citation
 
 ```bibtex
-@misc{engram2026,
-  title={Engram: Predictive Experience Models for AI Agent Memory},
+@misc{pexm2026,
+  title={PExM: Predictive Experience Models for AI Agent Memory},
   year={2026},
-  howpublished={\url{https://github.com/your-org/engram}},
+  howpublished={\url{https://github.com/nikghodki/pexm}},
 }
 ```
 

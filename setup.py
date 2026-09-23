@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="engram",
+    name="pexm",
     version="0.1.0",
     packages=find_packages(),
     python_requires=">=3.9",
@@ -11,7 +11,7 @@ setup(
         "safetensors",
         "numpy",
     ],
-    description="Predictive experience models for AI agent memory",
-    author="Engram Contributors",
+    description="PExM -- Predictive Experience Model for AI agent memory",
+    author="PExM Contributors",
     license="Apache-2.0",
 )
